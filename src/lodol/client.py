@@ -28,10 +28,9 @@ from lodol.exceptions import (
     RateLimitError,
     UnprocessableEntityError,
 )
-from lodol.models import Execution, Workflow
+from lodol.models import Execution, Workflow, TERMINAL_STATUSES
 
 DEFAULT_BASE_URL = "https://api-prod.lodol.com/api/v1"
-TERMINAL_STATUSES = {"success", "failed", "stopped"}
 USER_AGENT = "lodol-python/0.1.0"
 
 
