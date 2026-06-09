@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 import requests
 
+import lodol
 from lodol import (
     APIConnectionError,
     APIResponseValidationError,
@@ -16,6 +17,7 @@ from lodol import (
     NotFoundError,
     RateLimitError,
 )
+from lodol.client import USER_AGENT
 
 
 class FakeResponse:
@@ -111,6 +113,35 @@ def test_list_workflows() -> None:
     assert method == "GET"
     assert url == "https://example.test/api/v1/workflows"
     assert kwargs["headers"]["Authorization"] == "Bearer sk_live_test"
+    assert kwargs["headers"]["User-Agent"] == f"lodol-python/{lodol.__version__}"
+    assert kwargs["headers"]["User-Agent"] == USER_AGENT
+
+
+def test_list_workflows_rejects_non_object_response() -> None:
+    client = make_client([FakeResponse(200, ["not", "an", "object"])])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.workflows.list()
+
+    assert "GET /workflows returned list, expected object" in str(exc.value)
+
+
+def test_list_workflows_rejects_non_list_workflows_field() -> None:
+    client = make_client([FakeResponse(200, {"workflows": "not-a-list"})])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.workflows.list()
+
+    assert "field 'workflows' returned str, expected list" in str(exc.value)
+
+
+def test_list_workflows_rejects_non_object_items() -> None:
+    client = make_client([FakeResponse(200, {"workflows": ["not-an-object"]})])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.workflows.list()
+
+    assert "field 'workflows'[0] returned str, expected object" in str(exc.value)
 
 
 def test_retrieve_workflow_aliases_get() -> None:
@@ -121,6 +152,15 @@ def test_retrieve_workflow_aliases_get() -> None:
     workflow = client.workflows.get("665f")
 
     assert workflow.program == {"steps": []}
+
+
+def test_retrieve_workflow_rejects_non_object_response() -> None:
+    client = make_client([FakeResponse(200, ["not-an-object"])])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.workflows.retrieve("665f")
+
+    assert "GET /workflows/{workflow_id} returned list, expected object" in str(exc.value)
 
 
 def test_run_workflow_adds_idempotency_key() -> None:
@@ -142,6 +182,18 @@ def test_run_workflow_adds_idempotency_key() -> None:
     assert execution.execution_id == "683b"
     headers = client._session.requests[0][2]["headers"]  # type: ignore[attr-defined]
     assert headers["Idempotency-Key"].startswith("lodol-workflow-run-")
+
+
+def test_run_workflow_rejects_non_object_response() -> None:
+    client = make_client([FakeResponse(202, ["not-an-object"])])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.workflows.run("665f")
+
+    assert (
+        "POST /workflows/{workflow_id}/run-async returned list, expected object"
+        in str(exc.value)
+    )
 
 
 def test_run_workflow_uses_custom_idempotency_key() -> None:
@@ -201,6 +253,33 @@ def test_list_executions_with_filters() -> None:
     }
 
 
+def test_list_executions_rejects_non_object_items() -> None:
+    client = make_client([FakeResponse(200, {"executions": ["not-an-object"]})])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.executions.list()
+
+    assert "field 'executions'[0] returned str, expected object" in str(exc.value)
+
+
+def test_list_executions_rejects_non_object_response() -> None:
+    client = make_client([FakeResponse(200, ["not-an-object"])])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.executions.list()
+
+    assert "GET /executions returned list, expected object" in str(exc.value)
+
+
+def test_retrieve_execution_rejects_non_object_response() -> None:
+    client = make_client([FakeResponse(200, "not-an-object")])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.executions.retrieve("683b")
+
+    assert "GET /executions/{execution_id} returned str, expected object" in str(exc.value)
+
+
 def test_stop_execution_adds_idempotency_key() -> None:
     client = make_client([FakeResponse(200, {"execution_id": "e1", "status": "stopping"})])
 
@@ -209,6 +288,18 @@ def test_stop_execution_adds_idempotency_key() -> None:
     assert execution.status == "stopping"
     headers = client._session.requests[0][2]["headers"]  # type: ignore[attr-defined]
     assert headers["Idempotency-Key"].startswith("lodol-execution-stop-")
+
+
+def test_stop_execution_rejects_non_object_response() -> None:
+    client = make_client([FakeResponse(200, "not-an-object")])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.executions.stop("e1")
+
+    assert (
+        "POST /executions/{execution_id}/stop returned str, expected object"
+        in str(exc.value)
+    )
 
 
 def test_wait_polls_until_terminal(monkeypatch: pytest.MonkeyPatch) -> None:

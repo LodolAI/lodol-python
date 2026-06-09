@@ -29,9 +29,10 @@ from lodol.exceptions import (
     UnprocessableEntityError,
 )
 from lodol.models import Execution, Workflow, TERMINAL_STATUSES
+from lodol.version import __version__
 
 DEFAULT_BASE_URL = "https://api-prod.lodol.com/api/v1"
-USER_AGENT = "lodol-python/0.1.0"
+USER_AGENT = f"lodol-python/{__version__}"
 
 
 class Lodol:
@@ -231,12 +232,14 @@ class WorkflowsResource:
 
     def list(self) -> list[Workflow]:
         data = self._client._request("GET", "/workflows")
-        items = data.get("workflows", []) if isinstance(data, dict) else []
+        body = _expect_dict(data, "GET /workflows")
+        items = _expect_list(body.get("workflows"), "GET /workflows field 'workflows'")
         return [Workflow.from_api(item, client=self._client) for item in items]
 
     def retrieve(self, workflow_id: str) -> Workflow:
         data = self._client._request("GET", f"/workflows/{_path_id(workflow_id)}")
-        return Workflow.from_api(data, client=self._client)
+        body = _expect_dict(data, "GET /workflows/{workflow_id}")
+        return Workflow.from_api(body, client=self._client)
 
     def get(self, workflow_id: str) -> Workflow:
         return self.retrieve(workflow_id)
@@ -256,7 +259,8 @@ class WorkflowsResource:
             f"/workflows/{_path_id(workflow_id)}/run-async",
             idempotency_key=idempotency_key or _new_idempotency_key("workflow-run"),
         )
-        execution = Execution.from_api(data, client=self._client)
+        body = _expect_dict(data, "POST /workflows/{workflow_id}/run-async")
+        execution = Execution.from_api(body, client=self._client)
         if wait:
             return execution.wait(
                 poll_interval=poll_interval,
@@ -286,7 +290,8 @@ class ExecutionsResource:
         if after is not None:
             params["after"] = after
         data = self._client._request("GET", "/executions", params=params)
-        items = data.get("executions", []) if isinstance(data, dict) else []
+        body = _expect_dict(data, "GET /executions")
+        items = _expect_list(body.get("executions"), "GET /executions field 'executions'")
         return [Execution.from_api(item, client=self._client) for item in items]
 
     def retrieve(
@@ -300,7 +305,8 @@ class ExecutionsResource:
             f"/executions/{_path_id(execution_id)}",
             params={"include_step_results": str(include_step_results).lower()},
         )
-        return Execution.from_api(data, client=self._client)
+        body = _expect_dict(data, "GET /executions/{execution_id}")
+        return Execution.from_api(body, client=self._client)
 
     def get(
         self,
@@ -321,7 +327,8 @@ class ExecutionsResource:
             f"/executions/{_path_id(execution_id)}/stop",
             idempotency_key=idempotency_key or _new_idempotency_key("execution-stop"),
         )
-        return Execution.from_api(data, client=self._client)
+        body = _expect_dict(data, "POST /executions/{execution_id}/stop")
+        return Execution.from_api(body, client=self._client)
 
     def wait(
         self,
@@ -407,6 +414,36 @@ def _backoff_seconds(attempt: int) -> float:
     return min(8.0, 0.5 * (2.0**attempt))
 
 
+def _expect_dict(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise APIResponseValidationError(
+            f"{context} returned {type(value).__name__}, expected object",
+            status_code=200,
+            body=value,
+        )
+    return value
+
+
+def _expect_list(value: Any, context: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise APIResponseValidationError(
+            f"{context} returned {type(value).__name__}, expected list",
+            status_code=200,
+            body=value,
+        )
+
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise APIResponseValidationError(
+                f"{context}[{index}] returned {type(item).__name__}, expected object",
+                status_code=200,
+                body=item,
+            )
+        items.append(item)
+    return items
+
+
 def _error_from_response(response: requests.Response) -> APIStatusError:
     message = "Lodol API request failed"
     body: Any = None
@@ -453,4 +490,3 @@ def _error_from_response(response: requests.Response) -> APIStatusError:
     if response.status_code >= 500:
         return InternalServerError(message, **kwargs)
     return APIStatusError(message, **kwargs)
-

@@ -21,8 +21,7 @@ from lodol.exceptions import (
     UnprocessableEntityError,
 )
 from lodol.models import Execution, Workflow
-
-__version__ = "0.1.0"
+from lodol.version import __version__
 
 __all__ = [
     "APIConnectionError",
@@ -45,4 +44,5 @@ __all__ = [
     "RateLimitError",
     "UnprocessableEntityError",
     "Workflow",
+    "__version__",
 ]
