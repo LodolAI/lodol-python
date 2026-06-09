@@ -127,5 +127,8 @@ except RateLimitError as exc:
 For new Developer API endpoints before first-class SDK methods exist:
 
 ```python
+from lodol import Lodol
+
+client = Lodol()
 body = client.request("GET", "/workflows")
 ```
