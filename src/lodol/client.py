@@ -3,13 +3,22 @@ from __future__ import annotations
 import os
 import time
 import uuid
-import warnings
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Mapping, Optional
-from urllib.parse import quote
+from typing import Any, Mapping
+from urllib.parse import quote, urlparse
 
 import requests
 
+import lodol.constants as constants
+from lodol.constants import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_TIMEOUT,
+    RETRY_BACKOFF_BASE_SECONDS,
+    RETRY_BACKOFF_MAX_SECONDS,
+    RETRY_BACKOFF_MULTIPLIER,
+    USER_AGENT,
+)
 from lodol.exceptions import (
     APIConnectionError,
     APIError,
@@ -29,10 +38,6 @@ from lodol.exceptions import (
     UnprocessableEntityError,
 )
 from lodol.models import Execution, Workflow, TERMINAL_STATUSES
-from lodol.version import __version__
-
-DEFAULT_BASE_URL = "https://api-prod.lodol.com/api/v1"
-USER_AGENT = f"lodol-python/{__version__}"
 
 
 class Lodol:
@@ -45,26 +50,14 @@ class Lodol:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         *,
-        base_url: Optional[str] = None,
-        timeout: float = 30.0,
-        max_retries: int = 2,
-        session: Optional[requests.Session] = None,
-        default_headers: Optional[Mapping[str, str]] = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        session: requests.Session | None = None,
+        default_headers: Mapping[str, str] | None = None,
     ) -> None:
         resolved_api_key = api_key or os.environ.get("LODOL_API_KEY")
-        if resolved_api_key is None:
-            legacy_key = os.environ.get("SKIPFLOW_API_KEY")
-            if legacy_key is not None:
-                warnings.warn(
-                    "SKIPFLOW_API_KEY is deprecated for the Lodol SDK; use "
-                    "LODOL_API_KEY instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                resolved_api_key = legacy_key
-
         if not resolved_api_key:
             raise ConfigurationError(
                 "Missing API key. Pass api_key=... or set LODOL_API_KEY."
@@ -75,7 +68,7 @@ class Lodol:
             raise ConfigurationError("max_retries must be non-negative")
 
         self.api_key = resolved_api_key
-        self.base_url = _resolve_base_url(base_url)
+        self.base_url = _default_base_url()
         self.timeout = timeout
         self.max_retries = max_retries
         self.default_headers = dict(default_headers or {})
@@ -88,19 +81,22 @@ class Lodol:
     def with_options(
         self,
         *,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        timeout: Optional[float] = None,
-        max_retries: Optional[int] = None,
-        default_headers: Optional[Mapping[str, str]] = None,
+        api_key: str | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        default_headers: Mapping[str, str] | None = None,
     ) -> "Lodol":
-        """Return a new client with selected options changed."""
+        """Return a new client with selected options changed.
+
+        The returned client allocates a new ``requests.Session``. It does not
+        share the original client's connection pool, even if the original
+        client was created with a custom session.
+        """
         headers = dict(self.default_headers)
         if default_headers:
             headers.update(default_headers)
         return Lodol(
             api_key=api_key or self.api_key,
-            base_url=base_url or self.base_url,
             timeout=self.timeout if timeout is None else timeout,
             max_retries=self.max_retries if max_retries is None else max_retries,
             default_headers=headers,
@@ -122,14 +118,14 @@ class Lodol:
         method: str,
         path: str,
         *,
-        params: Optional[Mapping[str, Any]] = None,
+        params: Mapping[str, Any] | None = None,
         json: Any = None,
-        headers: Optional[Mapping[str, str]] = None,
-        idempotency_key: Optional[str] = None,
+        headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
     ) -> Any:
         """Make a low-level Developer API request.
 
-        ``path`` is relative to ``base_url`` and should usually start with ``/``.
+        ``path`` is relative to ``DEFAULT_BASE_URL`` and should usually start with ``/``.
         This is useful for new API endpoints before the SDK grows a first-class
         resource method.
         """
@@ -147,15 +143,15 @@ class Lodol:
         method: str,
         path: str,
         *,
-        params: Optional[Mapping[str, Any]] = None,
+        params: Mapping[str, Any] | None = None,
         json: Any = None,
-        headers: Optional[Mapping[str, str]] = None,
-        idempotency_key: Optional[str] = None,
+        headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
     ) -> Any:
         method = method.upper()
-        url = _join_url(self.base_url, path)
+        url = _url_for_path(path)
         request_headers = self._build_headers(headers, idempotency_key)
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -209,9 +205,9 @@ class Lodol:
 
     def _build_headers(
         self,
-        headers: Optional[Mapping[str, str]],
-        idempotency_key: Optional[str],
-    ) -> Dict[str, str]:
+        headers: Mapping[str, str] | None,
+        idempotency_key: str | None,
+    ) -> dict[str, str]:
         merged = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
@@ -248,10 +244,10 @@ class WorkflowsResource:
         self,
         workflow_id: str,
         *,
-        idempotency_key: Optional[str] = None,
+        idempotency_key: str | None = None,
         wait: bool = False,
-        poll_interval: float = 2.0,
-        timeout: Optional[float] = None,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        timeout: float | None = None,
         include_step_results: bool = False,
     ) -> Execution:
         data = self._client._request(
@@ -269,10 +265,6 @@ class WorkflowsResource:
             )
         return execution
 
-    def run_async(self, workflow_id: str, **kwargs: Any) -> Execution:
-        return self.run(workflow_id, **kwargs)
-
-
 class ExecutionsResource:
     def __init__(self, client: Lodol) -> None:
         self._client = client
@@ -280,11 +272,11 @@ class ExecutionsResource:
     def list(
         self,
         *,
-        workflow_id: Optional[str] = None,
+        workflow_id: str | None = None,
         limit: int = 20,
-        after: Optional[str] = None,
+        after: str | None = None,
     ) -> list[Execution]:
-        params: Dict[str, Any] = {"limit": limit}
+        params: dict[str, Any] = {"limit": limit}
         if workflow_id is not None:
             params["workflow_id"] = workflow_id
         if after is not None:
@@ -320,7 +312,7 @@ class ExecutionsResource:
         self,
         execution_id: str,
         *,
-        idempotency_key: Optional[str] = None,
+        idempotency_key: str | None = None,
     ) -> Execution:
         data = self._client._request(
             "POST",
@@ -334,8 +326,8 @@ class ExecutionsResource:
         self,
         execution_id: str,
         *,
-        poll_interval: float = 2.0,
-        timeout: Optional[float] = None,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        timeout: float | None = None,
         include_step_results: bool = True,
     ) -> Execution:
         if poll_interval <= 0:
@@ -364,20 +356,15 @@ class ExecutionsResource:
             time.sleep(sleep_for)
 
 
-def _resolve_base_url(base_url: Optional[str]) -> str:
-    raw = (
-        base_url
-        or os.environ.get("LODOL_BASE_URL")
-        or os.environ.get("LODOL_API_BASE_URL")
-        or DEFAULT_BASE_URL
-    )
-    return raw.rstrip("/")
+def _url_for_path(path: str) -> str:
+    return f"{_default_base_url()}/{path.lstrip('/')}"
 
 
-def _join_url(base_url: str, path: str) -> str:
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    return f"{base_url}/{path.lstrip('/')}"
+def _default_base_url() -> str:
+    base_url = constants.DEFAULT_BASE_URL.rstrip("/")
+    if urlparse(base_url).scheme != "https":
+        raise ConfigurationError("DEFAULT_BASE_URL must use HTTPS")
+    return base_url
 
 
 def _path_id(value: str) -> str:
@@ -388,12 +375,12 @@ def _new_idempotency_key(prefix: str) -> str:
     return f"lodol-{prefix}-{uuid.uuid4()}"
 
 
-def _can_retry(method: str, idempotency_key: Optional[str]) -> bool:
+def _can_retry(method: str, idempotency_key: str | None) -> bool:
     return method in {"GET", "HEAD", "OPTIONS"} or bool(idempotency_key)
 
 
 def _should_retry_response(status_code: int) -> bool:
-    return status_code in {408, 409, 429} or status_code >= 500
+    return status_code in {408, 429} or status_code >= 500
 
 
 def _retry_delay(response: requests.Response, attempt: int) -> float:
@@ -411,7 +398,10 @@ def _retry_delay(response: requests.Response, attempt: int) -> float:
 
 
 def _backoff_seconds(attempt: int) -> float:
-    return min(8.0, 0.5 * (2.0**attempt))
+    return min(
+        RETRY_BACKOFF_MAX_SECONDS,
+        RETRY_BACKOFF_BASE_SECONDS * (RETRY_BACKOFF_MULTIPLIER**attempt),
+    )
 
 
 def _expect_dict(value: Any, context: str) -> dict[str, Any]:

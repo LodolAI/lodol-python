@@ -24,21 +24,12 @@ pip install -e .[dev]
 export LODOL_API_KEY="sk_live_..."
 ```
 
-The production default base URL is `https://api-prod.lodol.com/api/v1`. Override it for local servers or non-production deployments:
-
-```bash
-export LODOL_BASE_URL="https://localhost:8000/api/v1"
-```
-
-You can also pass configuration explicitly:
+You can also pass the API key explicitly:
 
 ```python
 from lodol import Lodol
 
-client = Lodol(
-    api_key="sk_live_...",
-    base_url="https://localhost:8000/api/v1",
-)
+client = Lodol(api_key="sk_live_...")
 ```
 
 ## Run a workflow

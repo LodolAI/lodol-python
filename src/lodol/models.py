@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
+from lodol.constants import DEFAULT_POLL_INTERVAL
+
 TERMINAL_STATUSES = {"success", "failed", "stopped"}
 
 
@@ -93,7 +95,7 @@ class Execution:
     def wait(
         self,
         *,
-        poll_interval: float = 2.0,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
         timeout: Optional[float] = None,
         include_step_results: bool = True,
     ) -> "Execution":

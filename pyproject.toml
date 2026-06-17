@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lodol"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Python SDK for the Lodol Developer API"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
     {name = "Lodol"}
 ]
-license = {text = "Proprietary"}
+license = {text = "MIT"}
 dependencies = [
     "requests>=2.25.0",
 ]
@@ -28,6 +28,9 @@ dev = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "lodol.version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

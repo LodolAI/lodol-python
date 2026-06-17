@@ -6,6 +6,7 @@ import pytest
 import requests
 
 import lodol
+import lodol.constants as constants
 from lodol import (
     APIConnectionError,
     APIResponseValidationError,
@@ -56,7 +57,6 @@ class FakeSession:
 def make_client(responses: list[Any], **kwargs: Any) -> Lodol:
     return Lodol(
         api_key="sk_live_test",
-        base_url="https://example.test/api/v1",
         session=FakeSession(responses),  # type: ignore[arg-type]
         max_retries=0,
         **kwargs,
@@ -65,7 +65,6 @@ def make_client(responses: list[Any], **kwargs: Any) -> Lodol:
 
 def test_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LODOL_API_KEY", raising=False)
-    monkeypatch.delenv("SKIPFLOW_API_KEY", raising=False)
 
     with pytest.raises(ConfigurationError):
         Lodol()
@@ -78,13 +77,30 @@ def test_reads_lodol_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.api_key == "sk_live_env"
 
 
-def test_reads_base_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_uses_default_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LODOL_API_KEY", "sk_live_env")
-    monkeypatch.setenv("LODOL_BASE_URL", "https://localhost:8000/api/v1/")
+    monkeypatch.setattr(constants, "DEFAULT_BASE_URL", "https://example.test/api/v1/")
 
     client = Lodol(session=FakeSession([]))  # type: ignore[arg-type]
 
-    assert client.base_url == "https://localhost:8000/api/v1"
+    assert client.base_url == "https://example.test/api/v1"
+
+
+def test_rejects_http_default_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(constants, "DEFAULT_BASE_URL", "http://example.test/api/v1")
+
+    with pytest.raises(ConfigurationError, match="must use HTTPS"):
+        Lodol(api_key="sk_live_test", session=FakeSession([]))  # type: ignore[arg-type]
+
+
+def test_rejects_http_default_base_url_at_request_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client([FakeResponse(200, {"workflows": []})])
+    monkeypatch.setattr(constants, "DEFAULT_BASE_URL", "http://example.test/api/v1")
+
+    with pytest.raises(ConfigurationError, match="must use HTTPS"):
+        client.workflows.list()
 
 
 def test_list_workflows() -> None:
@@ -111,7 +127,7 @@ def test_list_workflows() -> None:
     assert workflows[0].name == "Daily report"
     method, url, kwargs = client._session.requests[0]  # type: ignore[attr-defined]
     assert method == "GET"
-    assert url == "https://example.test/api/v1/workflows"
+    assert url == f"{constants.DEFAULT_BASE_URL}/workflows"
     assert kwargs["headers"]["Authorization"] == "Bearer sk_live_test"
     assert kwargs["headers"]["User-Agent"] == f"lodol-python/{lodol.__version__}"
     assert kwargs["headers"]["User-Agent"] == USER_AGENT
@@ -370,7 +386,6 @@ def test_retries_get_transient_response(monkeypatch: pytest.MonkeyPatch) -> None
     ])
     client = Lodol(
         api_key="sk_live_test",
-        base_url="https://example.test/api/v1",
         session=session,  # type: ignore[arg-type]
         max_retries=1,
     )
@@ -380,6 +395,24 @@ def test_retries_get_transient_response(monkeypatch: pytest.MonkeyPatch) -> None
     assert len(session.requests) == 2
 
 
+def test_does_not_retry_conflict_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession([
+        FakeResponse(409, {"error": "Idempotency key conflict"}),
+        FakeResponse(200, {"workflows": []}),
+    ])
+    client = Lodol(
+        api_key="sk_live_test",
+        session=session,  # type: ignore[arg-type]
+        max_retries=1,
+    )
+    monkeypatch.setattr("lodol.client.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(ConflictError):
+        client.workflows.list()
+
+    assert len(session.requests) == 1
+
+
 def test_retries_idempotent_post_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
     session = FakeSession([
         requests.ConnectionError("down"),
@@ -387,7 +420,6 @@ def test_retries_idempotent_post_network_error(monkeypatch: pytest.MonkeyPatch) 
     ])
     client = Lodol(
         api_key="sk_live_test",
-        base_url="https://example.test/api/v1",
         session=session,  # type: ignore[arg-type]
         max_retries=1,
     )
@@ -403,7 +435,6 @@ def test_non_idempotent_post_network_error_not_retried() -> None:
     session = FakeSession([requests.ConnectionError("down")])
     client = Lodol(
         api_key="sk_live_test",
-        base_url="https://example.test/api/v1",
         session=session,  # type: ignore[arg-type]
         max_retries=1,
     )
@@ -417,7 +448,6 @@ def test_non_idempotent_post_network_error_not_retried() -> None:
 def test_with_options_merges_headers() -> None:
     client = Lodol(
         api_key="sk_live_test",
-        base_url="https://example.test/api/v1",
         default_headers={"X-A": "1"},
     )
 
