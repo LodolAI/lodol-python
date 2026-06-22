@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
 class LodolError(Exception):
@@ -90,7 +90,7 @@ class RateLimitError(APIStatusError):
         self,
         message: str,
         *,
-        retry_after: Optional[str] = None,
+        retry_after: str | None = None,
         status_code: int,
         response: Any = None,
         body: Any = None,

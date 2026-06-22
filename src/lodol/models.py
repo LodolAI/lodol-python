@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 from lodol.constants import DEFAULT_POLL_INTERVAL
 
@@ -13,11 +13,11 @@ class Workflow:
     id: str
     name: str
     description: str = ""
-    created_by: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    last_run_at: Optional[str] = None
-    program: Optional[dict[str, Any]] = None
+    created_by: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    last_run_at: str | None = None
+    program: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
     _client: Any = field(default=None, repr=False, compare=False)
 
@@ -48,13 +48,13 @@ class Workflow:
 class Execution:
     execution_id: str
     status: str
-    workflow_id: Optional[str] = None
-    workflow_name: Optional[str] = None
-    created_at: Optional[str] = None
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    error: Optional[str] = None
-    steps: Optional[list[dict[str, Any]]] = None
+    workflow_id: str | None = None
+    workflow_name: str | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    error: str | None = None
+    steps: list[dict[str, Any]] | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
     _client: Any = field(default=None, repr=False, compare=False)
 
@@ -96,7 +96,7 @@ class Execution:
         self,
         *,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         include_step_results: bool = True,
     ) -> "Execution":
         if self._client is None:
@@ -114,7 +114,7 @@ class Execution:
         return self._client.executions.stop(self.execution_id, **kwargs)
 
 
-def _optional_str(value: Any) -> Optional[str]:
+def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)

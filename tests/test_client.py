@@ -93,14 +93,16 @@ def test_rejects_http_default_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
         Lodol(api_key="sk_live_test", session=FakeSession([]))  # type: ignore[arg-type]
 
 
-def test_rejects_http_default_base_url_at_request_time(
+def test_requests_use_client_base_url_cached_at_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = make_client([FakeResponse(200, {"workflows": []})])
     monkeypatch.setattr(constants, "DEFAULT_BASE_URL", "http://example.test/api/v1")
 
-    with pytest.raises(ConfigurationError, match="must use HTTPS"):
-        client.workflows.list()
+    assert client.workflows.list() == []
+    method, url, _kwargs = client._session.requests[0]  # type: ignore[attr-defined]
+    assert method == "GET"
+    assert url == "https://api-prod.lodol.com/api/v1/workflows"
 
 
 def test_list_workflows() -> None:
@@ -210,6 +212,7 @@ def test_run_workflow_rejects_non_object_response() -> None:
         "POST /workflows/{workflow_id}/run-async returned list, expected object"
         in str(exc.value)
     )
+    assert exc.value.status_code == 202
 
 
 def test_run_workflow_uses_custom_idempotency_key() -> None:

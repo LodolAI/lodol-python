@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import time
 import uuid
@@ -38,6 +39,12 @@ from lodol.exceptions import (
     UnprocessableEntityError,
 )
 from lodol.models import Execution, Workflow, TERMINAL_STATUSES
+
+
+@dataclass(frozen=True)
+class _APIResponse:
+    body: Any
+    status_code: int
 
 
 class Lodol:
@@ -129,7 +136,7 @@ class Lodol:
         This is useful for new API endpoints before the SDK grows a first-class
         resource method.
         """
-        return self._request(
+        response = self._request_response(
             method,
             path,
             params=params,
@@ -137,8 +144,9 @@ class Lodol:
             headers=headers,
             idempotency_key=idempotency_key,
         )
+        return response.body
 
-    def _request(
+    def _request_response(
         self,
         method: str,
         path: str,
@@ -149,7 +157,7 @@ class Lodol:
         idempotency_key: str | None = None,
     ) -> Any:
         method = method.upper()
-        url = _url_for_path(path)
+        url = self._url_for_path(path)
         request_headers = self._build_headers(headers, idempotency_key)
         last_error: Exception | None = None
 
@@ -188,9 +196,12 @@ class Lodol:
                 raise _error_from_response(response)
 
             if not getattr(response, "content", b""):
-                return {}
+                return _APIResponse(body={}, status_code=response.status_code)
             try:
-                return response.json()
+                return _APIResponse(
+                    body=response.json(),
+                    status_code=response.status_code,
+                )
             except ValueError as exc:
                 raise APIResponseValidationError(
                     "Lodol API returned invalid JSON",
@@ -221,20 +232,34 @@ class Lodol:
             merged["Idempotency-Key"] = idempotency_key
         return merged
 
+    def _url_for_path(self, path: str) -> str:
+        return f"{self.base_url}/{path.lstrip('/')}"
+
 
 class WorkflowsResource:
     def __init__(self, client: Lodol) -> None:
         self._client = client
 
     def list(self) -> list[Workflow]:
-        data = self._client._request("GET", "/workflows")
-        body = _expect_dict(data, "GET /workflows")
-        items = _expect_list(body.get("workflows"), "GET /workflows field 'workflows'")
+        response = self._client._request_response("GET", "/workflows")
+        body = _expect_dict(response.body, "GET /workflows", response.status_code)
+        items = _expect_list(
+            body.get("workflows"),
+            "GET /workflows field 'workflows'",
+            response.status_code,
+        )
         return [Workflow.from_api(item, client=self._client) for item in items]
 
     def retrieve(self, workflow_id: str) -> Workflow:
-        data = self._client._request("GET", f"/workflows/{_path_id(workflow_id)}")
-        body = _expect_dict(data, "GET /workflows/{workflow_id}")
+        response = self._client._request_response(
+            "GET",
+            f"/workflows/{_path_id(workflow_id)}",
+        )
+        body = _expect_dict(
+            response.body,
+            "GET /workflows/{workflow_id}",
+            response.status_code,
+        )
         return Workflow.from_api(body, client=self._client)
 
     def get(self, workflow_id: str) -> Workflow:
@@ -250,12 +275,16 @@ class WorkflowsResource:
         timeout: float | None = None,
         include_step_results: bool = False,
     ) -> Execution:
-        data = self._client._request(
+        response = self._client._request_response(
             "POST",
             f"/workflows/{_path_id(workflow_id)}/run-async",
             idempotency_key=idempotency_key or _new_idempotency_key("workflow-run"),
         )
-        body = _expect_dict(data, "POST /workflows/{workflow_id}/run-async")
+        body = _expect_dict(
+            response.body,
+            "POST /workflows/{workflow_id}/run-async",
+            response.status_code,
+        )
         execution = Execution.from_api(body, client=self._client)
         if wait:
             return execution.wait(
@@ -281,9 +310,13 @@ class ExecutionsResource:
             params["workflow_id"] = workflow_id
         if after is not None:
             params["after"] = after
-        data = self._client._request("GET", "/executions", params=params)
-        body = _expect_dict(data, "GET /executions")
-        items = _expect_list(body.get("executions"), "GET /executions field 'executions'")
+        response = self._client._request_response("GET", "/executions", params=params)
+        body = _expect_dict(response.body, "GET /executions", response.status_code)
+        items = _expect_list(
+            body.get("executions"),
+            "GET /executions field 'executions'",
+            response.status_code,
+        )
         return [Execution.from_api(item, client=self._client) for item in items]
 
     def retrieve(
@@ -292,12 +325,16 @@ class ExecutionsResource:
         *,
         include_step_results: bool = False,
     ) -> Execution:
-        data = self._client._request(
+        response = self._client._request_response(
             "GET",
             f"/executions/{_path_id(execution_id)}",
             params={"include_step_results": str(include_step_results).lower()},
         )
-        body = _expect_dict(data, "GET /executions/{execution_id}")
+        body = _expect_dict(
+            response.body,
+            "GET /executions/{execution_id}",
+            response.status_code,
+        )
         return Execution.from_api(body, client=self._client)
 
     def get(
@@ -314,12 +351,16 @@ class ExecutionsResource:
         *,
         idempotency_key: str | None = None,
     ) -> Execution:
-        data = self._client._request(
+        response = self._client._request_response(
             "POST",
             f"/executions/{_path_id(execution_id)}/stop",
             idempotency_key=idempotency_key or _new_idempotency_key("execution-stop"),
         )
-        body = _expect_dict(data, "POST /executions/{execution_id}/stop")
+        body = _expect_dict(
+            response.body,
+            "POST /executions/{execution_id}/stop",
+            response.status_code,
+        )
         return Execution.from_api(body, client=self._client)
 
     def wait(
@@ -354,10 +395,6 @@ class ExecutionsResource:
             else:
                 sleep_for = poll_interval
             time.sleep(sleep_for)
-
-
-def _url_for_path(path: str) -> str:
-    return f"{_default_base_url()}/{path.lstrip('/')}"
 
 
 def _default_base_url() -> str:
@@ -404,21 +441,21 @@ def _backoff_seconds(attempt: int) -> float:
     )
 
 
-def _expect_dict(value: Any, context: str) -> dict[str, Any]:
+def _expect_dict(value: Any, context: str, status_code: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise APIResponseValidationError(
             f"{context} returned {type(value).__name__}, expected object",
-            status_code=200,
+            status_code=status_code,
             body=value,
         )
     return value
 
 
-def _expect_list(value: Any, context: str) -> list[dict[str, Any]]:
+def _expect_list(value: Any, context: str, status_code: int) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise APIResponseValidationError(
             f"{context} returned {type(value).__name__}, expected list",
-            status_code=200,
+            status_code=status_code,
             body=value,
         )
 
@@ -427,7 +464,7 @@ def _expect_list(value: Any, context: str) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             raise APIResponseValidationError(
                 f"{context}[{index}] returned {type(item).__name__}, expected object",
-                status_code=200,
+                status_code=status_code,
                 body=item,
             )
         items.append(item)
