@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lodol"
+dynamic = ["version"]
+description = "Python SDK for the Lodol Developer API"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "Lodol"}
+]
+license = {text = "Apache-2.0"}
+dependencies = [
+    "requests>=2.25.0",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "lodol.version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+
+[tool.setuptools.package-data]
+lodol = ["py.typed"]
