@@ -13,7 +13,7 @@ authors = [
 ]
 license = {text = "Apache-2.0"}
 dependencies = [
-    "requests>=2.25.0",
+    "requests>=2.34.2",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
