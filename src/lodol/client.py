@@ -294,6 +294,7 @@ class WorkflowsResource:
             )
         return execution
 
+
 class ExecutionsResource:
     def __init__(self, client: Lodol) -> None:
         self._client = client

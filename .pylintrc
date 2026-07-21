@@ -1,0 +1,6 @@
+# Only error-level (E) checks run in CI. The convention (C), warning (W), and
+# refactor (R) categories are disabled so the linter gates on real defects
+# rather than style — black and code review already cover formatting and style.
+# This mirrors the lint policy of the main lodol repository.
+[MESSAGES CONTROL]
+disable=C,W,R

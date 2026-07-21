@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # GitHub Actions used by the CI workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    open-pull-requests-limit: 5
+
+  # Python dependencies (runtime requirement + optional lint/test extras).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    versioning-strategy: increase
+    commit-message:
+      prefix: "pip"
+      include: "scope"
+    open-pull-requests-limit: 10

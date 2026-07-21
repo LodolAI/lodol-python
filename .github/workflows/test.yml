@@ -1,0 +1,68 @@
+name: Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+env:
+  # Minimum acceptable coverage. Bump this as coverage improves; never lower it
+  # without explicit approval.
+  COVERAGE_MIN: "70"
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Run every interpreter even if one fails, so a single-version break is
+      # easy to spot instead of cancelling the rest of the matrix.
+      fail-fast: false
+      matrix:
+        # The SDK declares requires-python >= 3.9, so exercise the whole range.
+        python-version: [ "3.9", "3.10", "3.11", "3.12", "3.13" ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install dependencies
+        # uv installs into the setup-python interpreter (--system); -e installs the
+        # package editable so ``import lodol`` resolves to ``src/lodol``.
+        run: uv pip install --system -e '.[test]'
+
+      - name: Run tests with coverage
+        run: |
+          pytest \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under="${COVERAGE_MIN}"
+
+      - name: Upload coverage report
+        # One artifact is enough; publish it from the newest interpreter only.
+        if: always() && matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14

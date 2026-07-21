@@ -22,8 +22,23 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = [
+# Test runner + coverage. Kept version-lenient so it installs across the full
+# supported Python matrix (3.9–3.13) exercised in CI.
+test = [
     "pytest>=8",
+    "pytest-cov>=5",
+]
+# Formatter / linter / type checker. Pinned to match the versions used by the
+# main lodol repository's CI so results are reproducible. The lint job runs on
+# Python 3.13 only, so these need not span the full test matrix.
+lint = [
+    "black==26.5.1",
+    "mypy==2.3.0",
+    "pylint==4.0.6",
+]
+# Everything needed for local development (`pip install -e .[dev]`).
+dev = [
+    "lodol[test,lint]",
 ]
 
 [tool.setuptools]

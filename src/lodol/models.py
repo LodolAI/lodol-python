@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from lodol.constants import DEFAULT_POLL_INTERVAL
+
+if TYPE_CHECKING:
+    from lodol.client import Lodol
 
 TERMINAL_STATUSES = {"success", "failed", "stopped"}
 
@@ -19,7 +22,7 @@ class Workflow:
     last_run_at: str | None = None
     program: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
-    _client: Any = field(default=None, repr=False, compare=False)
+    _client: "Lodol | None" = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_api(cls, data: Mapping[str, Any], *, client: Any = None) -> "Workflow":
@@ -56,7 +59,7 @@ class Execution:
     error: str | None = None
     steps: list[dict[str, Any]] | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
-    _client: Any = field(default=None, repr=False, compare=False)
+    _client: "Lodol | None" = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_api(cls, data: Mapping[str, Any], *, client: Any = None) -> "Execution":
