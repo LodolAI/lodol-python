@@ -1,0 +1,55 @@
+name: Lint
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Type-check, lint, and format check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install dependencies
+        # uv installs into the setup-python interpreter (--system), resolving the
+        # package plus its lint tools in a single pass — an identical environment
+        # far faster than pip because uv installs from a hard-linked wheel cache.
+        # Editable (-e) so pylint can import the package and resolve intra-package
+        # imports while linting ``src``.
+        run: uv pip install --system -e '.[lint]'
+
+      - name: Run mypy
+        run: mypy src --config-file mypy.ini
+
+      - name: Run pylint
+        # ``-j 0`` fans pylint out across all available cores. The repo's
+        # .pylintrc keeps only error-level checks, none of which are sensitive to
+        # parallelism, so results are identical to a serial run.
+        run: pylint src --rcfile=.pylintrc -j 0
+
+      - name: Run black
+        # ``--fast`` skips black's AST-equivalence re-parse. Under ``--check``
+        # black still computes the formatting to compare, so the pass/fail result
+        # is unchanged; only the redundant safety re-parse is dropped.
+        run: black --check --fast src
