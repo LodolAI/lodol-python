@@ -33,7 +33,7 @@ test = [
 # Python 3.13 only, so these need not span the full test matrix.
 lint = [
     "black==26.5.1",
-    "mypy==2.3.0",
+    "mypy==2.3.1",
     "pylint==4.0.7",
 ]
 # Everything needed for local development (`pip install -e .[dev]`).
