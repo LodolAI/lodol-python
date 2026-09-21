@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lodol.client import Lodol
+from lodol.client import Lodol, RateLimit
 from lodol.exceptions import (
     APIConnectionError,
     APIError,
@@ -9,18 +9,22 @@ from lodol.exceptions import (
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
+    ConcurrencyLimitError,
     ConflictError,
     ConfigurationError,
+    ExecutionNeedsAttentionError,
+    ExecutionNotFinishedError,
+    ExecutionTimeoutError,
     InternalServerError,
     LodolError,
-    LodolTimeoutError,
     NotFoundError,
     PaymentRequiredError,
     PermissionDeniedError,
     RateLimitError,
+    TriggerWorkflowError,
     UnprocessableEntityError,
 )
-from lodol.models import Execution, Workflow
+from lodol.models import Execution, Workflow, WorkflowInput, WorkflowOutput
 from lodol.version import __version__
 
 __all__ = [
@@ -31,18 +35,25 @@ __all__ = [
     "APITimeoutError",
     "AuthenticationError",
     "BadRequestError",
+    "ConcurrencyLimitError",
     "ConflictError",
     "ConfigurationError",
     "Execution",
+    "ExecutionNeedsAttentionError",
+    "ExecutionNotFinishedError",
+    "ExecutionTimeoutError",
     "InternalServerError",
     "Lodol",
     "LodolError",
-    "LodolTimeoutError",
     "NotFoundError",
     "PaymentRequiredError",
     "PermissionDeniedError",
+    "RateLimit",
     "RateLimitError",
+    "TriggerWorkflowError",
     "UnprocessableEntityError",
     "Workflow",
+    "WorkflowInput",
+    "WorkflowOutput",
     "__version__",
 ]
