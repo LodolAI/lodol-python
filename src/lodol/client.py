@@ -269,15 +269,30 @@ class WorkflowsResource:
         self,
         workflow_id: str,
         *,
+        inputs: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         wait: bool = False,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         timeout: float | None = None,
         include_step_results: bool = False,
     ) -> Execution:
+        """Start a run of a workflow.
+
+        ``inputs`` gives values for the inputs the workflow declares, by name
+        (``Workflow.inputs`` lists them), so one workflow can run for a
+        particular client, month or record. An input the workflow doesn't
+        declare, a missing required input or a value of the wrong type raises
+        ``BadRequestError`` naming the input, and nothing runs.
+        """
+        if inputs is not None and not isinstance(inputs, Mapping):
+            raise TypeError(
+                "inputs must be a mapping of input names to values, "
+                f"not {type(inputs).__name__}"
+            )
         response = self._client._request_response(
             "POST",
             f"/workflows/{_path_id(workflow_id)}/run-async",
+            json=None if inputs is None else {"inputs": dict(inputs)},
             idempotency_key=idempotency_key or _new_idempotency_key("workflow-run"),
         )
         body = _expect_dict(

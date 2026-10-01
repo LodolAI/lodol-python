@@ -20,7 +20,7 @@ from lodol.exceptions import (
     RateLimitError,
     UnprocessableEntityError,
 )
-from lodol.models import Execution, Workflow
+from lodol.models import Execution, Workflow, WorkflowInput
 from lodol.version import __version__
 
 __all__ = [
@@ -44,5 +44,6 @@ __all__ = [
     "RateLimitError",
     "UnprocessableEntityError",
     "Workflow",
+    "WorkflowInput",
     "__version__",
 ]
