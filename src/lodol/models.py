@@ -12,7 +12,33 @@ TERMINAL_STATUSES = {"success", "failed", "stopped"}
 
 
 @dataclass(frozen=True)
+class WorkflowInput:
+    """An input a workflow declares, which a run can be given a value for."""
+
+    name: str
+    type: str
+    required: bool = True
+    default: Any = None
+    description: str = ""
+
+    @classmethod
+    def from_api(cls, data: Mapping[str, Any]) -> "WorkflowInput":
+        return cls(
+            name=str(data.get("name", "")),
+            type=str(data.get("type", "")),
+            required=bool(data.get("required", True)),
+            default=data.get("default"),
+            description=str(data.get("description") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class Workflow:
+    """A workflow in the workspace.
+
+    ``id`` stays the same when the workflow is edited, so it is safe to store.
+    """
+
     id: str
     name: str
     description: str = ""
@@ -21,6 +47,7 @@ class Workflow:
     updated_at: str | None = None
     last_run_at: str | None = None
     program: dict[str, Any] | None = None
+    inputs: list[WorkflowInput] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
     _client: "Lodol | None" = field(default=None, repr=False, compare=False)
 
@@ -28,6 +55,7 @@ class Workflow:
     def from_api(cls, data: Mapping[str, Any], *, client: Any = None) -> "Workflow":
         raw = dict(data)
         program = raw.get("program")
+        inputs = raw.get("inputs")
         return cls(
             id=str(raw.get("id", "")),
             name=str(raw.get("name", "")),
@@ -37,6 +65,11 @@ class Workflow:
             updated_at=_optional_str(raw.get("updated_at")),
             last_run_at=_optional_str(raw.get("last_run_at")),
             program=program if isinstance(program, dict) else None,
+            inputs=[
+                WorkflowInput.from_api(item)
+                for item in (inputs if isinstance(inputs, list) else [])
+                if isinstance(item, Mapping)
+            ],
             raw=raw,
             _client=client,
         )
@@ -49,6 +82,12 @@ class Workflow:
 
 @dataclass(frozen=True)
 class Execution:
+    """A run of a workflow.
+
+    ``workflow_id`` is the workflow's ``id``. ``version_id`` is the version of
+    the workflow that ran, which changes as the workflow is edited.
+    """
+
     execution_id: str
     status: str
     workflow_id: str | None = None
@@ -58,6 +97,7 @@ class Execution:
     completed_at: str | None = None
     error: str | None = None
     steps: list[dict[str, Any]] | None = None
+    version_id: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
     _client: "Lodol | None" = field(default=None, repr=False, compare=False)
 
@@ -75,6 +115,7 @@ class Execution:
             completed_at=_optional_str(raw.get("completed_at")),
             error=_optional_str(raw.get("error")),
             steps=steps if isinstance(steps, list) else None,
+            version_id=_optional_str(raw.get("version_id")),
             raw=raw,
             _client=client,
         )

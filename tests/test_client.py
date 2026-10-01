@@ -11,12 +11,14 @@ from lodol import (
     APIConnectionError,
     APIResponseValidationError,
     AuthenticationError,
+    BadRequestError,
     ConfigurationError,
     ConflictError,
     Lodol,
     LodolTimeoutError,
     NotFoundError,
     RateLimitError,
+    WorkflowInput,
 )
 from lodol.client import USER_AGENT
 
@@ -200,6 +202,156 @@ def test_run_workflow_adds_idempotency_key() -> None:
     assert execution.execution_id == "683b"
     headers = client._session.requests[0][2]["headers"]  # type: ignore[attr-defined]
     assert headers["Idempotency-Key"].startswith("lodol-workflow-run-")
+
+
+def test_run_workflow_without_inputs_sends_no_body() -> None:
+    client = make_client(
+        [FakeResponse(202, {"execution_id": "683b", "workflow_id": "665f", "status": "queued"})]
+    )
+
+    client.workflows.run("665f")
+
+    kwargs = client._session.requests[0][2]  # type: ignore[attr-defined]
+    assert kwargs["json"] is None
+
+
+def test_run_workflow_sends_inputs() -> None:
+    client = make_client(
+        [FakeResponse(202, {"execution_id": "683b", "workflow_id": "665f", "status": "queued"})]
+    )
+
+    client.workflows.run("665f", inputs={"client": "Acme", "count": 2})
+
+    method, url, kwargs = client._session.requests[0]  # type: ignore[attr-defined]
+    assert method == "POST"
+    assert url == f"{constants.DEFAULT_BASE_URL}/workflows/665f/run-async"
+    assert kwargs["json"] == {"inputs": {"client": "Acme", "count": 2}}
+    assert kwargs["headers"]["Content-Type"] == "application/json"
+
+
+def test_run_workflow_rejects_inputs_that_are_not_a_mapping() -> None:
+    client = make_client([])
+
+    with pytest.raises(TypeError, match="mapping of input names to values"):
+        client.workflows.run("665f", inputs=[("client", "Acme")])  # type: ignore[arg-type]
+
+    assert client._session.requests == []  # type: ignore[attr-defined]
+
+
+def test_run_workflow_refused_inputs_raise_bad_request() -> None:
+    client = make_client(
+        [
+            FakeResponse(
+                400,
+                {"error": "'Monthly report' needs a value for its 'client' input."},
+            )
+        ]
+    )
+
+    with pytest.raises(BadRequestError) as exc:
+        client.workflows.run("665f", inputs={})
+
+    assert exc.value.status_code == 400
+    assert "'client' input" in str(exc.value)
+
+
+def test_run_reports_the_workflow_and_the_version_that_ran() -> None:
+    client = make_client(
+        [
+            FakeResponse(
+                202,
+                {
+                    "execution_id": "683b",
+                    "workflow_id": "665f",
+                    "version_id": "6683",
+                    "status": "queued",
+                },
+            )
+        ]
+    )
+
+    execution = client.workflows.run("665f")
+
+    assert execution.workflow_id == "665f"
+    assert execution.version_id == "6683"
+
+
+def test_retried_run_resends_the_same_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession([
+        requests.ConnectionError("down"),
+        FakeResponse(202, {"execution_id": "e1", "workflow_id": "w1", "status": "queued"}),
+    ])
+    client = Lodol(
+        api_key="sk_live_test",
+        session=session,  # type: ignore[arg-type]
+        max_retries=1,
+    )
+    monkeypatch.setattr("lodol.client.time.sleep", lambda _seconds: None)
+
+    client.workflows.run("w1", inputs={"client": "Acme"})
+
+    first, second = (kwargs for _method, _url, kwargs in session.requests)
+    assert first["json"] == second["json"] == {"inputs": {"client": "Acme"}}
+    assert first["headers"]["Idempotency-Key"] == second["headers"]["Idempotency-Key"]
+
+
+def test_workflow_lists_its_inputs() -> None:
+    client = make_client(
+        [
+            FakeResponse(
+                200,
+                {
+                    "id": "665f",
+                    "name": "Monthly report",
+                    "inputs": [
+                        {
+                            "name": "client",
+                            "type": "text",
+                            "required": True,
+                            "default": None,
+                            "description": "Who it's for",
+                        },
+                        {
+                            "name": "month",
+                            "type": "text",
+                            "required": False,
+                            "default": "this month",
+                            "description": "",
+                        },
+                    ],
+                },
+            )
+        ]
+    )
+
+    workflow = client.workflows.retrieve("665f")
+
+    assert workflow.inputs == [
+        WorkflowInput(name="client", type="text", required=True, description="Who it's for"),
+        WorkflowInput(name="month", type="text", required=False, default="this month"),
+    ]
+
+
+def test_workflow_without_inputs_lists_none() -> None:
+    client = make_client([FakeResponse(200, {"id": "665f", "name": "Daily report"})])
+
+    assert client.workflows.retrieve("665f").inputs == []
+
+
+def test_workflow_run_passes_inputs() -> None:
+    client = make_client(
+        [
+            FakeResponse(200, {"workflows": [{"id": "665f", "name": "Monthly report"}]}),
+            FakeResponse(202, {"execution_id": "683b", "workflow_id": "665f", "status": "queued"}),
+        ]
+    )
+
+    workflow = client.workflows.list()[0]
+    workflow.run(inputs={"client": "Acme"})
+
+    method, url, kwargs = client._session.requests[1]  # type: ignore[attr-defined]
+    assert (method, url) == ("POST", f"{constants.DEFAULT_BASE_URL}/workflows/665f/run-async")
+    assert kwargs["json"] == {"inputs": {"client": "Acme"}}
 
 
 def test_run_workflow_rejects_non_object_response() -> None:
