@@ -38,7 +38,7 @@ from lodol.exceptions import (
     RateLimitError,
     UnprocessableEntityError,
 )
-from lodol.models import Execution, Workflow, TERMINAL_STATUSES
+from lodol.models import DeletedWorkflow, Execution, Workflow, TERMINAL_STATUSES
 
 
 @dataclass(frozen=True)
@@ -264,6 +264,31 @@ class WorkflowsResource:
 
     def get(self, workflow_id: str) -> Workflow:
         return self.retrieve(workflow_id)
+
+    def delete(self, workflow_id: str) -> DeletedWorkflow:
+        """Delete a workflow and every version of it. This cannot be undone.
+
+        Any run in progress is stopped and its trigger or schedule stops
+        listening, as when the workflow is deleted from the Workflows page.
+        ``workflow_id`` may be the workflow's ``id`` or the id of any version.
+
+        Needs the ``workflows:delete`` scope, and the member who created the
+        key must be allowed to delete workflows in the workspace; otherwise
+        ``PermissionDeniedError``. A workflow that doesn't exist, or is already
+        gone, raises ``NotFoundError``. The request is not retried: if it times
+        out, check with ``retrieve`` before calling again, since the delete may
+        have happened.
+        """
+        response = self._client._request_response(
+            "DELETE",
+            f"/workflows/{_path_id(workflow_id)}",
+        )
+        body = _expect_dict(
+            response.body,
+            "DELETE /workflows/{workflow_id}",
+            response.status_code,
+        )
+        return DeletedWorkflow.from_api(body)
 
     def run(
         self,

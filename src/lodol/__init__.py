@@ -20,7 +20,7 @@ from lodol.exceptions import (
     RateLimitError,
     UnprocessableEntityError,
 )
-from lodol.models import Execution, Workflow, WorkflowInput
+from lodol.models import DeletedWorkflow, Execution, Workflow, WorkflowInput
 from lodol.version import __version__
 
 __all__ = [
@@ -33,6 +33,7 @@ __all__ = [
     "BadRequestError",
     "ConflictError",
     "ConfigurationError",
+    "DeletedWorkflow",
     "Execution",
     "InternalServerError",
     "Lodol",

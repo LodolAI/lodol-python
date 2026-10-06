@@ -33,6 +33,26 @@ class WorkflowInput:
 
 
 @dataclass(frozen=True)
+class DeletedWorkflow:
+    """What deleting a workflow removed: the workflow, with every version of it."""
+
+    id: str
+    name: str
+    deleted: bool = True
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_api(cls, data: Mapping[str, Any]) -> "DeletedWorkflow":
+        raw = dict(data)
+        return cls(
+            id=str(raw.get("id", "")),
+            name=str(raw.get("name", "")),
+            deleted=bool(raw.get("deleted", True)),
+            raw=raw,
+        )
+
+
+@dataclass(frozen=True)
 class Workflow:
     """A workflow in the workspace.
 
@@ -78,6 +98,12 @@ class Workflow:
         if self._client is None:
             raise RuntimeError("Workflow is not attached to a Lodol client")
         return self._client.workflows.run(self.id, **kwargs)
+
+    def delete(self) -> "DeletedWorkflow":
+        """Delete this workflow and every version of it. This cannot be undone."""
+        if self._client is None:
+            raise RuntimeError("Workflow is not attached to a Lodol client")
+        return self._client.workflows.delete(self.id)
 
 
 @dataclass(frozen=True)
