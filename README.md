@@ -113,6 +113,25 @@ for workflow in workflows:
 execution = workflow.run(wait=True)
 ```
 
+## Delete a workflow
+
+```python
+deleted = client.workflows.delete("665f...")
+print(deleted.id, deleted.name)
+```
+
+Or from a workflow you already have:
+
+```python
+workflow.delete()
+```
+
+This sends `DELETE /api/v1/workflows/{workflow_id}` and removes the workflow and every version of it, as deleting it from the Workflows page does: any run in progress is stopped, and its trigger or schedule stops listening. It cannot be undone. Its past runs stay readable under `client.executions`.
+
+The key needs the `workflows:delete` scope, which is not granted by default: tick **Delete workflows** when creating the key. The member who created the key must also be allowed to delete workflows in the workspace; otherwise the call raises `PermissionDeniedError`. A workflow that doesn't exist, or is already gone, raises `NotFoundError`.
+
+Deletes are not retried. If the request times out, check with `client.workflows.retrieve(...)` before calling again: the delete may have happened.
+
 ## Executions
 
 ```python

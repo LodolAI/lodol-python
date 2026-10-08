@@ -14,10 +14,13 @@ from lodol import (
     BadRequestError,
     ConfigurationError,
     ConflictError,
+    DeletedWorkflow,
     Lodol,
     LodolTimeoutError,
     NotFoundError,
+    PermissionDeniedError,
     RateLimitError,
+    Workflow,
     WorkflowInput,
 )
 from lodol.client import USER_AGENT
@@ -610,3 +613,99 @@ def test_with_options_merges_headers() -> None:
 
     assert other.timeout == 5
     assert other.default_headers == {"X-A": "1", "X-B": "2"}
+
+
+def test_delete_workflow() -> None:
+    client = make_client(
+        [FakeResponse(200, {"id": "665f", "name": "Old report", "deleted": True})]
+    )
+
+    deleted = client.workflows.delete("665f")
+
+    assert isinstance(deleted, DeletedWorkflow)
+    assert (deleted.id, deleted.name, deleted.deleted) == ("665f", "Old report", True)
+    method, url, kwargs = client._session.requests[0]  # type: ignore[attr-defined]
+    assert method == "DELETE"
+    assert url == "https://api-prod.lodol.com/api/v1/workflows/665f"
+    assert kwargs["json"] is None
+    # No idempotency key: repeating a delete is a 404, not a duplicate.
+    assert "Idempotency-Key" not in kwargs["headers"]
+
+
+def test_delete_workflow_escapes_the_id() -> None:
+    client = make_client([FakeResponse(200, {"id": "x", "name": "", "deleted": True})])
+
+    client.workflows.delete("a/b c")
+
+    _method, url, _kwargs = client._session.requests[0]  # type: ignore[attr-defined]
+    assert url.endswith("/workflows/a%2Fb%20c")
+
+
+def test_workflow_delete_uses_its_id() -> None:
+    client = make_client(
+        [
+            FakeResponse(200, {"id": "665f", "name": "Old report", "program": {}}),
+            FakeResponse(200, {"id": "665f", "name": "Old report", "deleted": True}),
+        ]
+    )
+    workflow = client.workflows.retrieve("665f")
+
+    deleted = workflow.delete()
+
+    assert deleted.id == "665f"
+    method, url, _kwargs = client._session.requests[1]  # type: ignore[attr-defined]
+    assert (method, url) == ("DELETE", "https://api-prod.lodol.com/api/v1/workflows/665f")
+
+
+def test_detached_workflow_cannot_delete() -> None:
+    with pytest.raises(RuntimeError, match="not attached"):
+        Workflow(id="665f", name="Old report").delete()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "message", "error_type"),
+    [
+        (403, "API key lacks required scope(s)", PermissionDeniedError),
+        (
+            403,
+            "The member this API key acts for is not allowed to delete workflows "
+            "in this workspace",
+            PermissionDeniedError,
+        ),
+        (404, "Workflow not found", NotFoundError),
+    ],
+)
+def test_delete_workflow_refusals(
+    status_code: int, message: str, error_type: type[Exception]
+) -> None:
+    """The scope, the key creator's role and the workflow's existence each
+    refuse with the server's message."""
+    client = make_client([FakeResponse(status_code, {"error": message})])
+
+    with pytest.raises(error_type) as exc:
+        client.workflows.delete("665f")
+
+    assert str(exc.value) == message
+
+
+def test_delete_workflow_is_not_retried() -> None:
+    session = FakeSession([requests.ConnectionError("down")])
+    client = Lodol(
+        api_key="sk_live_test",
+        session=session,  # type: ignore[arg-type]
+        max_retries=2,
+    )
+
+    with pytest.raises(APIConnectionError):
+        client.workflows.delete("665f")
+
+    assert len(session.requests) == 1
+
+
+def test_delete_workflow_rejects_non_object_response() -> None:
+    client = make_client([FakeResponse(200, ["not-an-object"])])
+
+    with pytest.raises(APIResponseValidationError) as exc:
+        client.workflows.delete("665f")
+
+    assert "DELETE /workflows/{workflow_id} returned list, expected object" in str(exc.value)
