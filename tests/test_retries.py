@@ -214,12 +214,12 @@ def test_a_months_runs_used_up_is_reported_not_slept_through(
 @pytest.mark.parametrize(
     "body",
     [
-        # Where the run starts, with the code ...
+        # Known by its code ...
         {
             "error": "Your plan allows 5 workflows to run at once.",
             "error_code": "concurrency_limit",
         },
-        # ... and from the check before it, with only the message.
+        # ... or, from a server before error codes, by its words.
         {
             "error": "Concurrent execution limit reached. Your plan allows 5 "
             "concurrent executions via the API."
@@ -236,6 +236,20 @@ def test_too_many_runs_at_once_is_reported_not_retried(
 
     assert exc.value.code == "concurrency_limit"
     assert len(api.requests) == 1
+
+
+def test_a_code_outranks_the_wording(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            429,
+            {"error": "Concurrent execution limit, said loosely", "error_code": "x"},
+        )
+    )
+
+    with pytest.raises(RateLimitError) as exc:
+        client.workflows.run("665f")
+
+    assert not isinstance(exc.value, ConcurrencyLimitError)
 
 
 def test_a_run_still_in_flight_under_its_key_is_waited_for(

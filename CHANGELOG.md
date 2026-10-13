@@ -6,19 +6,22 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 
 ### New
 
+- **Outputs.** `run.outputs` holds what a run handed back, by the names its workflow declares, and `workflow.outputs` lists them, so a script reads results instead of digging through step results.
 - **`AsyncLodol`**: everything `Lodol` does, for asyncio and trio.
 - **Approvals.** `lodol.approvals` lists the approval requests runs are waiting on, and answers them with `approve`, `reject` or `reply`.
 - **Lists you just loop over.** `runs.list()` and `approvals.list()` fetch pages as you go, newest first; `limit=` stops early.
 - **Lodol Local**, and any other address: `base_url=` or `LODOL_BASE_URL`.
 - **`RunFailedError`.** Waiting for a run that fails or is stopped raises, with the finished run attached, so a script never carries on as if it worked.
 - **`ConcurrencyLimitError` and `RunLimitError`**, both kinds of `RateLimitError`, so "too many runs at once" and "this month's runs are used up" (with `resets_at`) can be told apart from "slow down".
-- Every `APIStatusError` carries the server's machine-readable `code`.
+- Every `APIStatusError` carries the server's machine-readable `code`, which the SDK itself now goes by, never the wording, and `request_id`, which is also in the error's text, so it comes along when an error is pasted into a support request.
 - `Workflow.is_draft`. Times are timezone-aware `datetime`s, step results are `Step` objects, and `RunStatus` and `ApprovalStatus` list the statuses.
 - Dates, times, `Decimal`s and UUIDs in `inputs` are sent as text Lodol reads, and an input that can't be sent is named before anything is sent.
 - Any text works as an `idempotency_key`, and the same inputs are always sent byte for byte the same way, so a key always recognizes its request.
-- A workflow that starts from its own trigger, run with `wait=True`, returns at once with a warning: its run is it listening, and never ends.
+- A workflow that starts from its own trigger, run with `wait=True` or waited on with `runs.wait`, returns at once with a warning: its run is it listening, and never ends. `run.is_trigger_listener` says so, since its status reads `"running"` the whole time. A failed run says why in `run.error` in `runs.list` too.
 - Models can be hashed, and errors can be pickled, so both cross process boundaries (multiprocessing, task queues).
 - `LODOL_LOG=info` or `LODOL_LOG=debug` turns on logging.
+
+Outputs, `is_trigger_listener` and `request_id` come from Lodol as of October 2026. Against an older Lodol Local, `run.outputs` is empty, `request_id` is `None`, and only a run just started knows it is listening; the rest works as before.
 
 ### Fixed
 
@@ -44,7 +47,6 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 | `wait(poll_interval=...)` | Gone: waiting paces itself |
 | `LodolTimeoutError` | `WaitTimeoutError`, which is also a `TimeoutError` |
 | `RateLimitError.retry_after` as text | Seconds, as a number |
-| `APIStatusError.request_id` | Removed: the API doesn't send one |
 | `Lodol(session=requests.Session())` | `Lodol(http_client=httpx2.Client(...))` |
 | `default_headers=`, `with_options()` | Removed; use `http_client` |
 | Timestamps as text | Timezone-aware `datetime`s |

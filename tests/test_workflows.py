@@ -331,7 +331,7 @@ def test_a_workflow_that_starts_itself_isnt_waited_for(
     api.queue(respond(202, run_json(status="running", is_trigger_workflow=True)))
 
     with pytest.warns(
-        UserWarning, match=r"no end to wait for: it is now listening \(run 683b\)"
+        UserWarning, match=r"no end to wait for: it is listening \(run 683b\)"
     ):
         run = client.workflows.run("665f", wait=True)
 

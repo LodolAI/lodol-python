@@ -396,13 +396,22 @@ def test_stop(client: Lodol, api: FakeAPI) -> None:
     assert run.status == "stopping"
 
 
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        {"error": "Execution already success", "error_code": "run_already_finished"},
+        # A server from before error codes says so only in words.
+        {"error": "Execution already success"},
+    ],
+    ids=["by code", "by wording"],
+)
 def test_stopping_a_run_that_already_finished_returns_it(
-    client: Lodol, api: FakeAPI
+    client: Lodol, api: FakeAPI, refusal: dict[str, str]
 ) -> None:
     """A run that finishes just as it is stopped (a wait timed out, say) is
     no error: it is returned as it finished."""
     api.queue(
-        respond(400, {"error": "Execution already success"}),
+        respond(400, refusal),
         respond(200, run_json(status="success")),
     )
 
@@ -417,6 +426,66 @@ def test_stop_raises_other_refusals(client: Lodol, api: FakeAPI) -> None:
 
     with pytest.raises(BadRequestError, match="Something else"):
         client.runs.stop("683b")
+
+
+def test_stop_goes_by_the_code_over_the_wording(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            400, {"error": "Execution already odd", "error_code": "invalid_request"}
+        )
+    )
+
+    with pytest.raises(BadRequestError):
+        client.runs.stop("683b")
+
+
+def test_waiting_on_a_listening_workflow_returns_it(
+    client: Lodol, api: FakeAPI
+) -> None:
+    """Its status reads "running" for as long as it listens, so a wait would
+    never end."""
+    api.queue(
+        respond(
+            200,
+            run_json(
+                status="running", is_trigger_listener=True, workflow_name="New invoices"
+            ),
+        )
+    )
+
+    with pytest.warns(
+        UserWarning, match="'New invoices' starts from its own"
+    ) as warned:
+        run = client.runs.wait("683b")
+
+    assert run.is_trigger_listener and run.status == "running"
+    assert len(api.requests) == 1
+    # Pointed at the caller's own line.
+    assert warned[0].filename == __file__
+
+
+def test_waiting_on_a_listener_already_in_hand_checks_it_at_once(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    listener = Run.from_api(run_json(status="running", is_trigger_listener=True))
+    api.queue(respond(200, run_json(status="running", is_trigger_listener=True)))
+
+    with pytest.warns(UserWarning):
+        client.runs.wait(listener)
+
+    assert clock.sleeps == []
+
+
+def test_a_stopped_listener_is_waited_for_as_a_stopped_run(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(
+        respond(200, run_json(status="stopped", is_trigger_listener=True)),
+        respond(200, run_json(status="stopped", is_trigger_listener=True, steps=[])),
+    )
+
+    with pytest.raises(RunFailedError, match="stopped"):
+        client.runs.wait("683b")
 
 
 def test_a_wait_that_could_never_look_says_so(

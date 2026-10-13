@@ -264,10 +264,22 @@ async def test_a_workflow_that_starts_itself_isnt_waited_for(
 ) -> None:
     api.queue(respond(202, run_json(status="running", is_trigger_workflow=True)))
 
-    with pytest.warns(UserWarning, match="it is now listening"):
+    with pytest.warns(UserWarning, match="it is listening"):
         run = await aclient.workflows.run("665f", wait=True)
 
     assert run.status == "running" and len(api.requests) == 1
+
+
+async def test_waiting_on_a_listening_workflow_returns_it(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    api.queue(respond(200, run_json(status="running", is_trigger_listener=True)))
+
+    with pytest.warns(UserWarning, match="it is listening") as warned:
+        run = await aclient.runs.wait("683b")
+
+    assert run.is_trigger_listener and len(api.requests) == 1
+    assert warned[0].filename == __file__
 
 
 async def test_waiting_for_an_earlier_attempt(

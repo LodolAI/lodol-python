@@ -46,6 +46,7 @@ from lodol.models import (
     Step,
     Workflow,
     WorkflowInput,
+    WorkflowOutput,
 )
 from lodol.pagination import AsyncPaginator, Paginator
 from lodol.version import __version__
@@ -86,6 +87,7 @@ __all__ = [
     "WaitTimeoutError",
     "Workflow",
     "WorkflowInput",
+    "WorkflowOutput",
     "__version__",
 ]
 

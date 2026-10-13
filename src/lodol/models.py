@@ -30,9 +30,6 @@ class RunStatus(str, Enum):
     AWAITING_APPROVAL = "awaiting_approval"
     """A Request approval step is waiting for someone to answer it."""
     PAUSED = "paused"
-    WAITING_FOR_TRIGGER = "waiting_for_trigger"
-    """A workflow that starts from its own trigger, listening for its next
-    event."""
     STOPPING = "stopping"
     """Asked to stop, and finishing the step it was on."""
     SUCCESS = "success"
@@ -89,6 +86,25 @@ class WorkflowInput:
 
 
 @dataclass(frozen=True)
+class WorkflowOutput:
+    """A value a workflow declares it hands back, which a run that succeeds
+    has in ``Run.outputs`` under ``name``."""
+
+    name: str
+    type: str
+    """``"text"``, ``"number"``, ``"boolean"``, ``"list"`` or ``"object"``."""
+    description: str = ""
+
+    @classmethod
+    def from_api(cls, data: Mapping[str, Any]) -> WorkflowOutput:
+        return cls(
+            name=str(data.get("name") or ""),
+            type=str(data.get("type") or "text"),
+            description=str(data.get("description") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class Workflow:
     """A workflow in the workspace.
 
@@ -100,6 +116,8 @@ class Workflow:
     name: str
     description: str = ""
     inputs: list[WorkflowInput] = field(default_factory=list, hash=False)
+    outputs: list[WorkflowOutput] = field(default_factory=list, hash=False)
+    """What a run that succeeds hands back, in ``Run.outputs``."""
     is_draft: bool = False
     created_by: str | None = None
     created_at: dt.datetime | None = None
@@ -115,6 +133,7 @@ class Workflow:
         raw = dict(data)
         program = raw.get("program")
         inputs = raw.get("inputs")
+        outputs = raw.get("outputs")
         return cls(
             id=str(raw.get("id") or ""),
             name=str(raw.get("name") or ""),
@@ -122,6 +141,11 @@ class Workflow:
             inputs=[
                 WorkflowInput.from_api(item)
                 for item in (inputs if isinstance(inputs, list) else [])
+                if isinstance(item, Mapping)
+            ],
+            outputs=[
+                WorkflowOutput.from_api(item)
+                for item in (outputs if isinstance(outputs, list) else [])
                 if isinstance(item, Mapping)
             ],
             # Only an explicit draft is one: a workflow from before drafts
@@ -182,8 +206,8 @@ class Run:
     ``workflow_id`` is the workflow's ``id``; ``version_id`` is the version of
     the workflow that ran, which changes as the workflow is edited. ``steps``
     is ``None`` unless step results were asked for (``runs.wait`` asks for
-    them by default). ``workflow_name`` comes with ``runs.list`` only, and
-    ``error`` with ``runs.get`` and ``runs.wait`` only.
+    them by default). ``outputs`` comes with ``runs.get`` and ``runs.wait``
+    only, not with ``runs.list``.
     """
 
     id: str
@@ -194,6 +218,15 @@ class Run:
     version_id: str | None = None
     error: str | None = None
     """Why the run failed, when it did."""
+    outputs: dict[str, Any] = field(default_factory=dict, hash=False)
+    """What the run handed back, by the names its workflow declares
+    (``Workflow.outputs``). Empty until the run succeeds, and for a workflow
+    that declares none. An output the run never set is ``None``."""
+    is_trigger_listener: bool = False
+    """Whether this is a workflow that starts from its own trigger or
+    schedule, listening. It never finishes on its own: each event it catches
+    starts a run of its own, listed with the rest. Its status reads
+    ``"running"`` while it listens."""
     created_at: dt.datetime | None = None
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
@@ -214,6 +247,7 @@ class Run:
     def from_api(cls, data: Mapping[str, Any]) -> Run:
         raw = dict(data)
         steps = raw.get("steps")
+        outputs = raw.get("outputs")
         return cls(
             id=str(raw.get("execution_id") or raw.get("id") or ""),
             status=str(raw.get("status") or ""),
@@ -221,6 +255,12 @@ class Run:
             workflow_name=_optional_str(raw.get("workflow_name")),
             version_id=_optional_str(raw.get("version_id")),
             error=_optional_str(raw.get("error")),
+            outputs=dict(outputs) if isinstance(outputs, Mapping) else {},
+            # A server from before the flag says so only of a run it just
+            # started, as ``is_trigger_workflow``.
+            is_trigger_listener=bool(
+                raw.get("is_trigger_listener", raw.get("is_trigger_workflow"))
+            ),
             created_at=parse_datetime(raw.get("created_at")),
             started_at=parse_datetime(raw.get("started_at")),
             completed_at=parse_datetime(raw.get("completed_at")),

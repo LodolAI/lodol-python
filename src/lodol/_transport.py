@@ -475,10 +475,9 @@ def status_error(response: httpx2.Response) -> APIStatusError:
                 body=body,
                 response=response,
             )
-        # The run endpoint refuses this way twice: with this code from where
-        # the run starts, and with just the message from the check before it.
-        if code == "concurrency_limit" or message.startswith(
-            "Concurrent execution limit"
+        # A server from before error codes said this only in words.
+        if code == "concurrency_limit" or (
+            code is None and message.startswith("Concurrent execution limit")
         ):
             return ConcurrencyLimitError(
                 message,

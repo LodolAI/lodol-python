@@ -1,6 +1,7 @@
 """A small stand-in for the Developer API, served over a real socket.
 
-It behaves as the server's own code does: its errors, its cursors, and its
+It behaves as the server's own code does: its errors (each with an
+``error_code``), its cursors, its ``X-Request-Id`` on every answer, and its
 Idempotency-Key handling (in flight: 409 + Retry-After; done: the first
 answer replayed; reused for something else: 422).
 """
@@ -8,6 +9,7 @@ answer replayed; reused for something else: 422).
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import threading
 import time
@@ -43,10 +45,16 @@ class StandIn:
                         "description": "",
                     }
                 ],
+                "outputs": [{"name": "total", "type": "number", "description": ""}],
             },
-            "7a1c": {"id": "7a1c", "name": "Always fails", "inputs": []},
+            "7a1c": {
+                "id": "7a1c",
+                "name": "Always fails",
+                "inputs": [],
+                "outputs": [],
+            },
             # Starts from its own trigger: running it sets it listening.
-            "9b2e": {"id": "9b2e", "name": "New invoices", "inputs": []},
+            "9b2e": {"id": "9b2e", "name": "New invoices", "inputs": [], "outputs": []},
         }
         # Newest first, as the API lists them.
         self.runs: list[dict[str, Any]] = []
@@ -77,6 +85,8 @@ class StandIn:
         self.start_seconds = 0.0
         self.in_flight_retry_after = "5"
         self.next_id = 1
+        # Its own counter: a reply is often sent with ``lock`` already held.
+        self.request_numbers = itertools.count(1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -90,10 +100,19 @@ class Handler(BaseHTTPRequestHandler):
     def _reply(
         self, status: int, body: Any = None, headers: dict[str, str] | None = None
     ) -> None:
+        if status >= 400 and isinstance(body, dict) and not body.get("error_code"):
+            # The code for its kind, as the server gives any refusal that
+            # names nothing more exact.
+            body = {
+                **body,
+                "error_code": _FALLBACK_CODES.get(status, "invalid_request"),
+            }
         data = b"" if body is None else json.dumps(body).encode()
+        request_id = f"req_{next(self.server.state.request_numbers):032x}"
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Request-Id", request_id)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
@@ -110,9 +129,15 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(state.slow_seconds)
         token = self.headers.get("Authorization", "")
         if not token.startswith("Bearer "):
-            return self._error(401, "Missing or malformed Authorization header")
+            return self._error(
+                401,
+                "Missing or malformed Authorization header",
+                error_code="missing_api_key",
+            )
         if token != f"Bearer {KEY}":
-            return self._error(401, "Invalid or expired API key")
+            return self._error(
+                401, "Invalid or expired API key", error_code="invalid_api_key"
+            )
         url = urlsplit(self.path)
         parts = [p for p in url.path.split("/") if p][2:]  # drop "api", "v1"
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
@@ -170,7 +195,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(404, "Execution not found")
             if method == "POST" and parts[2:] == ["stop"]:
                 if run["status"] in ("success", "failed", "stopped"):
-                    return self._error(400, f"Execution already {run['status']}")
+                    return self._error(
+                        400,
+                        f"Execution already {run['status']}",
+                        error_code="run_already_finished",
+                    )
                 # A run in progress is asked to stop, and stops just after.
                 run["status"] = "stopped"
                 return self._reply(
@@ -240,7 +269,8 @@ class Handler(BaseHTTPRequestHandler):
                     409,
                     {
                         "error": "A request with this Idempotency-Key is currently "
-                        "being processed. Please retry later."
+                        "being processed. Please retry later.",
+                        "error_code": "request_in_progress",
                     },
                     {"Retry-After": state.in_flight_retry_after},
                 )
@@ -277,7 +307,8 @@ class Handler(BaseHTTPRequestHandler):
         inputs = body.get("inputs") or {}
         if workflow["inputs"] and "client" not in inputs:
             return 400, {
-                "error": f"'{workflow['name']}' needs a value for its 'client' input."
+                "error": f"'{workflow['name']}' needs a value for its 'client' input.",
+                "error_code": "invalid_inputs",
             }
         run_id = f"r{state.next_id}"
         state.next_id += 1
@@ -295,6 +326,8 @@ class Handler(BaseHTTPRequestHandler):
                 "started_at": None,
                 "completed_at": None,
                 "error": None,
+                "outputs": {},
+                "is_trigger_listener": listening,
                 "fails": fails,
                 "listening": listening,
                 "inputs": inputs,
@@ -317,6 +350,7 @@ class Handler(BaseHTTPRequestHandler):
             "version_id": "v" + workflow_id,
             "status": "queued",
             "created_at": "2026-10-13T09:00:00+00:00",
+            "is_trigger_listener": listening,
         }
         if listening:
             started.update(status="running", is_trigger_workflow=True)
@@ -334,34 +368,41 @@ class Handler(BaseHTTPRequestHandler):
             run["completed_at"] = "2026-10-13T09:00:04+00:00"
             if run["fails"]:
                 run["error"] = "Sheet not found"
+            elif run["workflow_id"] == "665f":
+                run["outputs"] = {"total": 1250}
 
     @staticmethod
     def _listed(run: dict[str, Any]) -> dict[str, Any]:
-        # As GET /executions lists a run: no error, no steps.
+        # As GET /executions lists a run: no outputs, no steps.
         fields = (
             "execution_id",
             "workflow_id",
             "version_id",
             "workflow_name",
             "status",
+            "is_trigger_listener",
             "created_at",
             "started_at",
             "completed_at",
+            "error",
         )
         return {name: run[name] for name in fields}
 
     @staticmethod
     def _detail(run: dict[str, Any]) -> dict[str, Any]:
-        # As GET /executions/<id> gives a run: no workflow name.
+        # As GET /executions/<id> gives a run: with what it handed back.
         fields = (
             "execution_id",
             "workflow_id",
             "version_id",
+            "workflow_name",
             "status",
+            "is_trigger_listener",
             "created_at",
             "started_at",
             "completed_at",
             "error",
+            "outputs",
         )
         return {name: run[name] for name in fields}
 
@@ -389,6 +430,16 @@ class Handler(BaseHTTPRequestHandler):
                 "via": "api",
             }
         return 200, approval
+
+
+_FALLBACK_CODES = {
+    400: "invalid_request",
+    401: "unauthorized",
+    404: "not_found",
+    409: "conflict",
+    422: "unprocessable_request",
+    429: "rate_limited",
+}
 
 
 class Server(ThreadingHTTPServer):
