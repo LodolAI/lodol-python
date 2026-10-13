@@ -21,6 +21,12 @@ if TYPE_CHECKING:  # pragma: no cover - only for type hints
 class LodolError(Exception):
     """Base class for every error the SDK raises."""
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        # Rebuilt from its parts rather than through __init__, whose keyword
+        # arguments pickle can't supply, so an error can cross a process
+        # boundary (multiprocessing, concurrent.futures, task queues).
+        return (_rebuild, (type(self), self.args, self.__dict__))
+
 
 class ConfigurationError(LodolError):
     """The client was set up with a missing or invalid setting."""
@@ -191,3 +197,12 @@ class RunLimitError(RateLimitError):
 
 class InternalServerError(APIStatusError):
     """5xx: something went wrong on Lodol's side. The client already retried."""
+
+
+def _rebuild(
+    error_type: type[LodolError], args: tuple[Any, ...], state: dict[str, Any]
+) -> LodolError:
+    error = error_type.__new__(error_type)
+    error.args = args
+    error.__dict__.update(state)
+    return error

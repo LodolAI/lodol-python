@@ -15,14 +15,18 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - Every `APIStatusError` carries the server's machine-readable `code`.
 - `Workflow.is_draft`. Times are timezone-aware `datetime`s, step results are `Step` objects, and `RunStatus` and `ApprovalStatus` list the statuses.
 - Dates, times, `Decimal`s and UUIDs in `inputs` are sent as text Lodol reads, and an input that can't be sent is named before anything is sent.
+- Any text works as an `idempotency_key`, and the same inputs are always sent byte for byte the same way, so a key always recognizes its request.
+- A workflow that starts from its own trigger, run with `wait=True`, returns at once with a warning: its run is it listening, and never ends.
+- Models can be hashed, and errors can be pickled, so both cross process boundaries (multiprocessing, task queues).
 - `LODOL_LOG=info` or `LODOL_LOG=debug` turns on logging.
 
 ### Fixed
 
 - **A workspace that had used up its month's runs made `workflows.run` sleep until they came back, for up to a month.** The client waited out whatever `Retry-After` the server sent. It now raises `RunLimitError` at once, and never waits out a `Retry-After` longer than 60 seconds by itself.
-- **A run retried after a timeout could raise `ConflictError` although it had started.** When the first attempt was still starting the run, the retry was refused as "in progress". The client now waits as the server asks and returns that run.
-- **Waiting for a run could end in `RateLimitError`.** It checked every 2 seconds and fetched every step's results each time, enough to use up a Pro workspace's 15 requests a minute on its own. It now checks often at first and then every 10 seconds, fetches step results once, at the end, and rides out rate limits and brief outages instead of failing.
-- Retries back off with jitter, so clients that failed together don't all retry together.
+- **A run retried after a timeout could raise `ConflictError` although it had started.** When the first attempt was still starting the run, the retry was refused as "in progress". The client now waits for that attempt, as the server asks, for up to five minutes, and returns its run.
+- **Waiting for a run could end in `RateLimitError`.** It checked every 2 seconds and fetched every step's results each time: 30 requests a minute, six times the Free plan's allowance. It now checks often at first, then every 10 seconds, never faster than the workspace's allowance, and fetches step results once, at the end. It rides out rate limits and brief outages, keeps to its `timeout`, and never turns a finished run into an error because its step results couldn't be fetched.
+- Retries back off with jitter, so clients that failed together don't all retry together. A request a rate limit refused is retried whatever it was, since Lodol refuses before doing anything; a certificate that can't be verified fails at once, with a hint.
+- Lodol Local is reached directly, never through a proxy from the environment, which would have seen the key in plain HTTP.
 - An error from a proxy no longer makes its HTML page the error message; the page stays on `error.body`.
 - Printing a `Workflow` no longer prints its whole program.
 
@@ -53,6 +57,7 @@ Importing `Execution` or `LodolTimeoutError` still works in 0.2, with a `Depreca
 
 ### Behind the scenes
 
-- CI tests every supported Python (3.10 to 3.15), the oldest dependency versions the package allows, both async event loops, and every example in the README, which runs as written against a stand-in API.
+- CI tests every supported Python (3.10 to 3.15), the oldest dependency versions the package allows, both async event loops, and every example in the README, which runs as written against a stand-in API that answers as the server's own code does.
+- The source distribution includes the tests whole, so they run from it.
 - The tests are type-checked, as users' code would be, and the package is built and checked as PyPI checks it on every change.
 - The action that publishes to PyPI is pinned to a commit.

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import warnings
 
+import httpx2
 import pytest
 
 import lodol
@@ -150,3 +151,76 @@ def test_lodol_log_turns_on_logging(level: str) -> None:
 
     assert done.stdout.strip() == level.upper()
     assert "lodol INFO hello" in done.stderr
+
+
+def test_errors_cross_process_boundaries() -> None:
+    """Pickled, as multiprocessing, concurrent.futures and task queues do."""
+    response = httpx2.Response(
+        429,
+        json={"error": "Out of runs", "error_code": "monthly_run_limit"},
+        request=httpx2.Request("POST", "https://api-prod.lodol.com/api/v1/x"),
+    )
+    run = Run(id="683b", status="failed", error="Sheet not found")
+    errors: list[lodol.LodolError] = [
+        lodol.NotFoundError("Workflow not found", status_code=404, code=None, body={}),
+        lodol.RunLimitError(
+            "Out of runs",
+            status_code=429,
+            retry_after=60.0,
+            resets_at=dt.datetime(2026, 11, 1, tzinfo=UTC),
+            limit=2000,
+            code="monthly_run_limit",
+            response=response,
+        ),
+        lodol.RunFailedError("Run 683b failed: Sheet not found", run=run),
+        WaitTimeoutError("Stopped waiting", run=run),
+        lodol.APITimeoutError("no answer"),
+        lodol.ConfigurationError("No key"),
+    ]
+
+    for error in errors:
+        copy = pickle.loads(pickle.dumps(error))
+        assert type(copy) is type(error)
+        assert str(copy) == str(error)
+        assert copy.__dict__.keys() == error.__dict__.keys()
+
+    limit = pickle.loads(pickle.dumps(errors[1]))
+    assert isinstance(limit, lodol.RunLimitError)
+    assert limit.resets_at == dt.datetime(2026, 11, 1, tzinfo=UTC)
+    assert limit.response is not None and limit.response.status_code == 429
+    failed = pickle.loads(pickle.dumps(errors[2]))
+    assert isinstance(failed, lodol.RunFailedError) and failed.run == run
+    assert isinstance(pickle.loads(pickle.dumps(errors[3])), TimeoutError)
+
+
+def test_models_can_be_hashed_whatever_they_hold() -> None:
+    workflow = Workflow.from_api(
+        {"id": "665f", "name": "x", "inputs": [{"name": "tags", "default": ["a"]}]}
+    )
+    run = Run.from_api(
+        {
+            "execution_id": "r",
+            "status": "success",
+            "steps": [{"index": 0, "result": {"a": 1}}],
+        }
+    )
+
+    assert {workflow, workflow} == {workflow}
+    assert {run, run} == {run}
+    # What a field holds (here, step results) stays out of the hash.
+    assert hash(run) == hash(Run.from_api({"execution_id": "r", "status": "success"}))
+
+
+def test_statuses_include_every_one_a_run_reports() -> None:
+    assert {status.value for status in RunStatus} >= {
+        "queued",
+        "running",
+        "waiting",
+        "awaiting_approval",
+        "paused",
+        "waiting_for_trigger",
+        "stopping",
+        "success",
+        "failed",
+        "stopped",
+    }

@@ -165,3 +165,35 @@ def test_request_returns_none_for_an_empty_answer(client: Lodol, api: FakeAPI) -
     api.queue(respond(204))
 
     assert client.request("DELETE", "/somewhere") is None
+
+
+def test_http_client_must_match_the_client() -> None:
+    sync_http, async_http = httpx2.Client(), httpx2.AsyncClient()
+
+    with pytest.raises(TypeError, match="must be an httpx2.Client, not AsyncClient"):
+        Lodol(api_key="k", http_client=async_http)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="must be an httpx2.AsyncClient, not Client"):
+        lodol.AsyncLodol(api_key="k", http_client=sync_http)  # type: ignore[arg-type]
+
+    sync_http.close()
+
+
+def test_lodol_local_is_reached_directly_never_through_a_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy from the environment would see a plain-HTTP request, key and
+    all; HTTPS goes through it encrypted."""
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.com:8080")
+
+    with Lodol(api_key="k", base_url="http://localhost:3901") as local:
+        assert local._http_client.trust_env is False
+    with Lodol(api_key="k") as cloud:
+        assert cloud._http_client.trust_env is True
+
+
+def test_request_repeats_a_parameter_given_a_list(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"ok": True}))
+
+    client.request("GET", "/things", params={"id": ["a", "b"], "flag": True})
+
+    assert str(api.last.url).endswith("/things?id=a&id=b&flag=true")

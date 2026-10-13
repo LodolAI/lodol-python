@@ -19,7 +19,8 @@ from typing import Any, Mapping
 
 class RunStatus(str, Enum):
     """Where a run is. ``Run.status`` holds one of these values as text, so
-    ``run.status == "success"`` and ``run.status == RunStatus.SUCCESS`` agree."""
+    ``run.status == "success"`` and ``run.status == RunStatus.SUCCESS`` agree.
+    A status this version doesn't list may still appear, as text."""
 
     QUEUED = "queued"
     """Waiting for a free slot to start."""
@@ -28,6 +29,12 @@ class RunStatus(str, Enum):
     """Set aside by a Wait step until its time comes."""
     AWAITING_APPROVAL = "awaiting_approval"
     """A Request approval step is waiting for someone to answer it."""
+    PAUSED = "paused"
+    WAITING_FOR_TRIGGER = "waiting_for_trigger"
+    """A workflow that starts from its own trigger, listening for its next
+    event."""
+    STOPPING = "stopping"
+    """Asked to stop, and finishing the step it was on."""
     SUCCESS = "success"
     FAILED = "failed"
     STOPPED = "stopped"
@@ -66,7 +73,7 @@ class WorkflowInput:
     type: str
     """``"text"``, ``"number"``, ``"boolean"``, ``"list"`` or ``"object"``."""
     required: bool = True
-    default: Any = None
+    default: Any = field(default=None, hash=False)
     """The value an optional input takes when a run leaves it out."""
     description: str = ""
 
@@ -92,13 +99,13 @@ class Workflow:
     id: str
     name: str
     description: str = ""
-    inputs: list[WorkflowInput] = field(default_factory=list)
+    inputs: list[WorkflowInput] = field(default_factory=list, hash=False)
     is_draft: bool = False
     created_by: str | None = None
     created_at: dt.datetime | None = None
     updated_at: dt.datetime | None = None
     last_run_at: dt.datetime | None = None
-    program: dict[str, Any] | None = field(default=None, repr=False)
+    program: dict[str, Any] | None = field(default=None, repr=False, hash=False)
     """The workflow's steps, as Lodol stores them. Only ``workflows.get``
     includes it."""
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
@@ -154,8 +161,8 @@ class Step:
     index: int
     status: str
     """``"completed"`` or ``"failed"``. A step inside a loop reports its last pass."""
-    result: Any = None
-    error: Any = None
+    result: Any = field(default=None, hash=False)
+    error: Any = field(default=None, hash=False)
 
     @classmethod
     def from_api(cls, data: Mapping[str, Any]) -> Step:
@@ -175,7 +182,8 @@ class Run:
     ``workflow_id`` is the workflow's ``id``; ``version_id`` is the version of
     the workflow that ran, which changes as the workflow is edited. ``steps``
     is ``None`` unless step results were asked for (``runs.wait`` asks for
-    them by default). ``workflow_name`` comes with ``runs.list`` only.
+    them by default). ``workflow_name`` comes with ``runs.list`` only, and
+    ``error`` with ``runs.get`` and ``runs.wait`` only.
     """
 
     id: str
@@ -189,7 +197,7 @@ class Run:
     created_at: dt.datetime | None = None
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
-    steps: list[Step] | None = field(default=None, repr=False)
+    steps: list[Step] | None = field(default=None, repr=False, hash=False)
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property

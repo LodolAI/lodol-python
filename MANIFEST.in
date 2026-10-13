@@ -1,0 +1,4 @@
+# The tests ship with the source, whole, so they can be run from it.
+graft tests
+global-exclude __pycache__
+global-exclude *.py[cod]

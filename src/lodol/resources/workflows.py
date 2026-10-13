@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Any, Mapping, Union
 
 from lodol._transport import (
@@ -10,6 +11,7 @@ from lodol._transport import (
     encode_json,
     expect_list,
     expect_object,
+    idempotency_key_header,
     new_idempotency_key,
     path_id,
 )
@@ -64,7 +66,8 @@ class Workflows:
 
         A workflow that starts from its own trigger or schedule doesn't run
         to an end: running it sets it listening, and each event it catches
-        starts a run of its own, so don't wait for it.
+        starts a run of its own. With ``wait=True`` it returns at once, with
+        a warning, since there is no end to wait for.
 
         A retried request never starts a second run. To make sure a run
         happens once across separate calls, such as a job that may run
@@ -76,7 +79,7 @@ class Workflows:
         started = Run.from_api(
             expect_object(self._client._send(request), "POST /workflows/{id}/run-async")
         )
-        if not wait:
+        if not wait or _listening(started):
             return started
         return self._client.runs.wait(started, timeout=timeout)
 
@@ -136,7 +139,8 @@ class AsyncWorkflows:
 
         A workflow that starts from its own trigger or schedule doesn't run
         to an end: running it sets it listening, and each event it catches
-        starts a run of its own, so don't wait for it.
+        starts a run of its own. With ``wait=True`` it returns at once, with
+        a warning, since there is no end to wait for.
 
         A retried request never starts a second run. To make sure a run
         happens once across separate calls, such as a job that may run
@@ -150,7 +154,7 @@ class AsyncWorkflows:
                 await self._client._send(request), "POST /workflows/{id}/run-async"
             )
         )
-        if not wait:
+        if not wait or _listening(started):
             return started
         return await self._client.runs.wait(started, timeout=timeout)
 
@@ -219,9 +223,27 @@ def _run_request(
             except (TypeError, ValueError) as exc:
                 raise TypeError(f"Input {name!r}: {exc}") from None
         body = {"inputs": dict(inputs)}
+    if idempotency_key is None:
+        idempotency_key = new_idempotency_key("workflow-run")
+    else:
+        idempotency_key_header(idempotency_key)
     return APIRequest(
         "POST",
         f"/workflows/{path_id(workflow_id)}/run-async",
         body=body,
-        idempotency_key=idempotency_key or new_idempotency_key("workflow-run"),
+        idempotency_key=idempotency_key,
     )
+
+
+def _listening(started: Run) -> bool:
+    """Whether a run just started is a workflow's trigger listening, which
+    never finishes; warned about, since waiting for it would never end."""
+    if not started.raw.get("is_trigger_workflow"):
+        return False
+    warnings.warn(
+        "This workflow starts from its own trigger or schedule, so there's no end "
+        f"to wait for: it is now listening (run {started.id}), and each event it "
+        "catches starts a run of its own.",
+        stacklevel=3,
+    )
+    return True

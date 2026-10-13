@@ -55,9 +55,9 @@ lodol.workflows.run(
 )
 ```
 
-Within 24 hours, the same key with the same inputs returns the run it already started. The same key with different inputs raises `UnprocessableEntityError`.
+Within 24 hours, the same key with the same inputs returns the run it already started, even if the first attempt is still under way. The same key with different inputs raises `UnprocessableEntityError`. Any text up to 256 characters works as a key.
 
-**Workflows that start themselves.** A workflow that starts from its own trigger or schedule doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own. Don't wait for it.
+**Workflows that start themselves.** A workflow that starts from its own trigger or schedule doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own. With `wait=True`, `run` returns at once, with a warning, since there's no end to wait for.
 
 ## Wait for a run
 
@@ -75,18 +75,18 @@ else:
         print(step.index, step.status, step.result)
 ```
 
-`wait` checks on the run often at first, then less often, at most every 10 seconds, so a long run uses few of your workspace's API requests. Rate limits and brief outages don't end a wait: it slows down and keeps going, and gives up only when `timeout` passes, or after five minutes without a successful check.
+`wait` checks on the run often at first, then less often, at most every 10 seconds, and never faster than your plan's API allowance (the Free plan's 5 requests a minute means a check every 12 seconds). Rate limits and brief outages don't end a wait: it slows down and keeps going, and gives up only when `timeout` passes, or after five minutes without a successful check.
 
-The finished run comes with its step results (`run.steps`). `RunFailedError` carries the run too, as `error.run`, so you can see which step failed. Without a `timeout`, `wait` waits as long as the run takes, including while it waits for someone to answer an approval.
+The finished run comes with its step results (`run.steps`). `RunFailedError` carries the run too, as `error.run`, so you can see which step failed. If the run has finished but its step results can't be fetched in time, you get the run without them rather than an error. Without a `timeout`, `wait` waits as long as the run takes, including while it waits for someone to answer an approval.
 
 ## Follow runs
 
 ```python
 for run in lodol.runs.list(workflow="665f...", limit=20):
-    print(run.created_at, run.status, run.error)
+    print(run.created_at, run.status)
 ```
 
-Runs come newest first. Loop over the result and pages are fetched as you go, so stopping early costs nothing extra. Leave out `limit` to go through all of them, and `workflow` to see every workflow's runs.
+Runs come newest first. Loop over the result and pages are fetched as you go, so stopping early costs nothing extra. Leave out `limit` to go through all of them, and `workflow` to see every workflow's runs. Listed runs leave out `error` and `steps`; `runs.get` has them.
 
 ```python
 run = lodol.runs.get("683b...", include_steps=True)
@@ -129,7 +129,7 @@ A delete is never sent twice. If it times out, check with `lodol.workflows.get(.
 
 ## Errors
 
-Everything the SDK raises is a `LodolError`. Errors from the API carry Lodol's own explanation as their message, and `code` when it sends one.
+When Lodol or the network says no, the SDK raises a `LodolError`. Errors from the API carry Lodol's own explanation as their message, and `code` when it sends one. A call that can't be made as written (inputs that aren't a dict, a timeout that isn't a number) raises `TypeError` or `ValueError` before anything is sent.
 
 | Exception | When | What to do |
 | --- | --- | --- |
@@ -139,18 +139,18 @@ Everything the SDK raises is a `LodolError`. Errors from the API carry Lodol's o
 | `AuthenticationError` | The key is missing, wrong, revoked or expired | Check `LODOL_API_KEY` |
 | `PermissionDeniedError` | The key's scopes, or its creator's role, don't allow this | Give the key the scope, or use another key |
 | `NotFoundError` | No such workflow, run or approval in this workspace | Check the id |
-| `ConflictError` | An approval was already answered | Nothing to do |
+| `ConflictError` | An approval was already answered; or Lodol was still working on an earlier attempt of a request after five minutes | For an approval, nothing. Otherwise check before trying again: the message has the key to retry with |
 | `ConcurrencyLimitError` | Your plan's runs-at-once limit is reached | Wait for a run to finish, then start another |
 | `RunLimitError` | This month's runs are used up | Runs come back at `error.resets_at` |
 | `RateLimitError` | Too many requests, for longer than the SDK waits on its own | Wait `error.retry_after` seconds |
-| `APIConnectionError`, `APITimeoutError` | Lodol couldn't be reached or didn't answer, even after retries | Try again later |
+| `APIConnectionError`, `APITimeoutError` | Lodol couldn't be reached, didn't answer, or had a certificate that couldn't be verified | Try again later; for a certificate, see the message |
 
 ## What happens automatically
 
-- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads, and runs, stops and approval answers, which carry an idempotency key. Deletes and longer limits are reported at once.
-- **Idempotency keys.** Every run, stop and approval answer gets one, so a retry can never start a second run or answer twice.
+- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads; runs, stops and approval answers, which carry an idempotency key; and anything a rate limit refused, since Lodol refuses before doing anything. A delete that fails otherwise, and limits that last longer, are reported at once.
+- **Idempotency keys.** Every run, stop and approval answer gets one, so a retry can never start a second run or answer twice. If a retry finds Lodol still working on the first attempt, it waits for that, up to five minutes, rather than starting again.
 - **Timeouts.** Each request may take 30 seconds (`timeout`). Waiting for a run has its own `timeout`.
-- **Security.** Your key is only sent over HTTPS, except to Lodol Local on your own machine, and never appears in logs or reprs.
+- **Security.** Your key is only sent over HTTPS, except to Lodol Local on your own machine, which is reached directly, never through a proxy. It never appears in logs or reprs.
 
 ## Async
 
@@ -215,7 +215,7 @@ lodol = Lodol(
 )
 ```
 
-Models are plain data, so you can also build them directly: `Run(id="683b", status="success")`.
+Models are plain data, so you can also build them directly: `Run(id="683b", status="success")`. They can be compared, hashed and pickled, and so can the SDK's errors.
 
 ## Endpoints the SDK doesn't cover yet
 

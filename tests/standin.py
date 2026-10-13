@@ -45,6 +45,8 @@ class StandIn:
                 ],
             },
             "7a1c": {"id": "7a1c", "name": "Always fails", "inputs": []},
+            # Starts from its own trigger: running it sets it listening.
+            "9b2e": {"id": "9b2e", "name": "New invoices", "inputs": []},
         }
         # Newest first, as the API lists them.
         self.runs: list[dict[str, Any]] = []
@@ -70,7 +72,10 @@ class StandIn:
         ]
         self.headers_seen: list[dict[str, str]] = []
         self.slow_seconds = 0.0
-        self.run_delay = 0.0
+        # How long starting a run takes, during which a retry under the same
+        # Idempotency-Key hears 409 + Retry-After, as from the server.
+        self.start_seconds = 0.0
+        self.in_flight_retry_after = "5"
         self.next_id = 1
 
 
@@ -157,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
                 runs = runs[ids.index(query["after"]) + 1 :]
             limit = min(int(query.get("limit", 20)), 100)
             return self._reply(
-                200, {"executions": [self._public(r) for r in runs[:limit]]}
+                200, {"executions": [self._listed(r) for r in runs[:limit]]}
             )
         if parts[:1] == ["executions"] and len(parts) >= 2:
             run = next((r for r in state.runs if r["execution_id"] == parts[1]), None)
@@ -166,12 +171,13 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and parts[2:] == ["stop"]:
                 if run["status"] in ("success", "failed", "stopped"):
                     return self._error(400, f"Execution already {run['status']}")
+                # A run in progress is asked to stop, and stops just after.
                 run["status"] = "stopped"
                 return self._reply(
-                    200, {"execution_id": run["execution_id"], "status": "stopped"}
+                    200, {"execution_id": run["execution_id"], "status": "stopping"}
                 )
             self._advance(state, run)
-            body = self._public(run)
+            body = self._detail(run)
             if query.get("include_step_results") == "true":
                 body["steps"] = run["steps"]
             return self._reply(200, body)
@@ -225,19 +231,40 @@ class Handler(BaseHTTPRequestHandler):
             if entry["fingerprint"] != fingerprint:
                 return self._error(
                     422,
-                    "This Idempotency-Key has already been used for a different request. Reuse a key only for identical retries.",
+                    "This Idempotency-Key has already been used for a different "
+                    "request. Reuse a key only for identical retries.",
                     error_code="idempotency_key_reused",
+                )
+            if entry["state"] == "processing":
+                return self._reply(
+                    409,
+                    {
+                        "error": "A request with this Idempotency-Key is currently "
+                        "being processed. Please retry later."
+                    },
+                    {"Retry-After": state.in_flight_retry_after},
                 )
             return self._reply(
                 entry["status"], entry["body"], {"X-Idempotent-Replayed": "true"}
             )
+        state.idempotency[key] = {"state": "processing", "fingerprint": fingerprint}
+        if state.start_seconds:
+            # Slow work, during which other requests are answered.
+            state.lock.release()
+            try:
+                time.sleep(state.start_seconds)
+            finally:
+                state.lock.acquire()
         status, body = handler()
         if 200 <= status < 300:
             state.idempotency[key] = {
+                "state": "done",
                 "fingerprint": fingerprint,
                 "status": status,
                 "body": body,
             }
+        else:
+            del state.idempotency[key]
         self._reply(status, body)
 
     def _start_run(
@@ -255,6 +282,7 @@ class Handler(BaseHTTPRequestHandler):
         run_id = f"r{state.next_id}"
         state.next_id += 1
         fails = workflow_id == "7a1c"
+        listening = workflow_id == "9b2e"
         state.runs.insert(
             0,
             {
@@ -262,12 +290,13 @@ class Handler(BaseHTTPRequestHandler):
                 "workflow_id": workflow_id,
                 "version_id": "v" + workflow_id,
                 "workflow_name": workflow["name"],
-                "status": "queued",
+                "status": "running" if listening else "queued",
                 "created_at": "2026-10-13T09:00:00+00:00",
                 "started_at": None,
                 "completed_at": None,
                 "error": None,
                 "fails": fails,
+                "listening": listening,
                 "inputs": inputs,
                 "steps": [
                     {
@@ -282,17 +311,20 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
         state.polls[run_id] = 0
-        return 202, {
+        started: dict[str, Any] = {
             "execution_id": run_id,
             "workflow_id": workflow_id,
             "version_id": "v" + workflow_id,
             "status": "queued",
             "created_at": "2026-10-13T09:00:00+00:00",
         }
+        if listening:
+            started.update(status="running", is_trigger_workflow=True)
+        return 202, started
 
     @staticmethod
     def _advance(state: StandIn, run: dict[str, Any]) -> None:
-        if run["status"] in ("success", "failed", "stopped"):
+        if run["status"] in ("success", "failed", "stopped") or run["listening"]:
             return
         state.polls[run["execution_id"]] = state.polls.get(run["execution_id"], 0) + 1
         if state.polls[run["execution_id"]] == 1:
@@ -304,8 +336,34 @@ class Handler(BaseHTTPRequestHandler):
                 run["error"] = "Sheet not found"
 
     @staticmethod
-    def _public(run: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in run.items() if k not in ("fails", "inputs", "steps")}
+    def _listed(run: dict[str, Any]) -> dict[str, Any]:
+        # As GET /executions lists a run: no error, no steps.
+        fields = (
+            "execution_id",
+            "workflow_id",
+            "version_id",
+            "workflow_name",
+            "status",
+            "created_at",
+            "started_at",
+            "completed_at",
+        )
+        return {name: run[name] for name in fields}
+
+    @staticmethod
+    def _detail(run: dict[str, Any]) -> dict[str, Any]:
+        # As GET /executions/<id> gives a run: no workflow name.
+        fields = (
+            "execution_id",
+            "workflow_id",
+            "version_id",
+            "status",
+            "created_at",
+            "started_at",
+            "completed_at",
+            "error",
+        )
+        return {name: run[name] for name in fields}
 
     def _decide(self, state: StandIn, approval_id: str, raw: bytes) -> tuple[int, Any]:
         approval = next((a for a in state.approvals if a["id"] == approval_id), None)

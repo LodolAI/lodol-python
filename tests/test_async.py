@@ -10,6 +10,7 @@ from lodol import (
     AsyncLodol,
     BadRequestError,
     ConcurrencyLimitError,
+    ConflictError,
     DeletedWorkflow,
     InternalServerError,
     RunFailedError,
@@ -59,7 +60,7 @@ async def test_run_and_wait(
 
     assert run.succeeded and run.steps is not None
     assert api.body(0) == {"inputs": {"client": "Acme"}}
-    assert clock.sleeps == [1.0]
+    assert clock.sleeps == [1.0, 1.5]
 
 
 async def test_a_failed_run_raises(aclient: AsyncLodol, api: FakeAPI) -> None:
@@ -231,3 +232,67 @@ async def test_stop_raises_other_refusals(aclient: AsyncLodol, api: FakeAPI) -> 
 
     with pytest.raises(BadRequestError, match="Something else"):
         await aclient.runs.stop("683b")
+
+
+async def test_a_run_that_succeeded_is_never_reported_as_an_error(
+    aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(
+        respond(200, run_json(status="success")),
+        *[httpx2.ConnectError("refused")] * 100,
+    )
+
+    run = await aclient.runs.wait("683b")
+
+    assert run.succeeded and run.steps is None
+
+
+async def test_wait_keeps_its_deadline(
+    aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    limited = respond(429, {"error": "Rate limit exceeded."}, {"Retry-After": "60"})
+    api.queue(respond(200, run_json(status="running")), *[limited] * 5)
+
+    with pytest.raises(WaitTimeoutError):
+        await aclient.runs.wait("683b", timeout=5)
+
+    assert sum(clock.sleeps) <= 5
+
+
+async def test_a_workflow_that_starts_itself_isnt_waited_for(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    api.queue(respond(202, run_json(status="running", is_trigger_workflow=True)))
+
+    with pytest.warns(UserWarning, match="it is now listening"):
+        run = await aclient.workflows.run("665f", wait=True)
+
+    assert run.status == "running" and len(api.requests) == 1
+
+
+async def test_waiting_for_an_earlier_attempt(
+    aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    in_flight = respond(409, {"error": "Still processing"}, {"Retry-After": "5"})
+    api.queue(httpx2.ReadTimeout("slow"), *[in_flight] * 5, respond(202, run_json()))
+
+    run = await aclient.workflows.run("665f")
+
+    assert run.id == "683b" and clock.sleeps.count(5.0) == 5
+
+
+async def test_an_answer_that_cant_be_read(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(httpx2.DecodingError("bad gzip"))
+
+    with pytest.raises(APIConnectionError, match="couldn't be read"):
+        await aclient.workflows.list()
+
+
+async def test_an_earlier_attempt_still_in_flight_after_five_minutes(
+    aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    in_flight = respond(409, {"error": "Still processing"}, {"Retry-After": "5"})
+    api.queue(httpx2.ReadTimeout("slow"), *[in_flight] * 70)
+
+    with pytest.raises(ConflictError, match="still working on an earlier attempt"):
+        await aclient.workflows.run("665f")

@@ -24,16 +24,26 @@ MAX_RETRY_DELAY = 8.0
 # rate limit resets within a minute; anything longer (a month's runs used up,
 # say) is reported at once rather than slept through.
 MAX_RETRY_AFTER = 60.0
+# How long a retry waits for an earlier attempt of the same request (same
+# Idempotency-Key) that Lodol is still working on: as long as the server
+# holds its lock on that key.
+IN_FLIGHT_MAX_WAIT = 300.0
+# The most an idempotency key can be, as Lodol takes them.
+MAX_IDEMPOTENCY_KEY_LENGTH = 256
 
-# Polling while waiting for a run: the first check after 1s, then slowing by
-# half again each time to one check every 10s, so a long run spends little of
-# the workspace's per-minute request allowance.
+# Polling while waiting for a run: checks 1s apart at first (a run that was
+# just started isn't checked at once), slowing by half again each time to one
+# check every 10s. Slower still when the workspace's rate limit asks for it:
+# never more than its per-minute allowance, and not at all while it is used up.
 INITIAL_POLL_INTERVAL = 1.0
 MAX_POLL_INTERVAL = 10.0
 POLL_BACKOFF = 1.5
 # How long waiting rides out failures (lost connection, rate limits, server
 # errors) with no successful check in between, before giving up.
 WAIT_ERROR_TOLERANCE = 300.0
+# The least time a check made while waiting is given to answer, however close
+# the wait's deadline is.
+MIN_CHECK_TIMEOUT = 1.0
 
 # The most a list call asks for in one page; the API's own maximum.
 MAX_PAGE_SIZE = 100

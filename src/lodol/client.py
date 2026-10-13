@@ -154,7 +154,10 @@ def _raw_request(
     )
 
 
-def _query_value(value: Any) -> str:
+def _query_value(value: Any) -> str | list[str]:
+    if isinstance(value, (list, tuple)):
+        # A list repeats the parameter: ?id=a&id=b.
+        return [str(_query_value(item)) for item in value]
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)

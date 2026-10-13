@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import ssl
 from email.utils import format_datetime
 
 import httpx2
@@ -241,8 +242,8 @@ def test_a_run_still_in_flight_under_its_key_is_waited_for(
     client: Lodol, api: FakeAPI, clock: FakeClock
 ) -> None:
     """The first attempt timed out but is still starting the run. The retry
-    hears 409 + Retry-After until it can replay that run's answer, rather
-    than raising a conflict about a run that did start (0.1 raised here)."""
+    hears 409 + Retry-After, and waits until it can replay that run's answer
+    rather than raising a conflict about a run that did start (as 0.1 did)."""
     api.queue(
         httpx2.ReadTimeout("slow"),
         respond(
@@ -443,3 +444,171 @@ def test_debug_logging_shows_each_request_and_replays(
 
     assert "POST /workflows/665f/run-async -> 202 in" in caplog.text
     assert "(replayed: this request was already done)" in caplog.text
+
+
+def test_waiting_for_an_earlier_attempt_doesnt_use_up_retries(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    """However many times Lodol says it's still working on the first attempt
+    (up to its own five-minute lock), the retry keeps asking, rather than
+    raising after max_retries while that attempt goes through."""
+    in_flight = respond(
+        409,
+        {"error": "A request with this Idempotency-Key is currently being processed."},
+        {"Retry-After": "5"},
+    )
+    api.queue(
+        httpx2.ReadTimeout("slow"),
+        *[in_flight] * 10,
+        httpx2.Response(
+            202, json=run_json(), headers={"X-Idempotent-Replayed": "true"}
+        ),
+    )
+
+    run = client.workflows.run("665f")
+
+    assert run.id == "683b"
+    assert clock.sleeps.count(5.0) == 10
+    keys = {request.headers["Idempotency-Key"] for request in api.requests}
+    assert len(keys) == 1
+
+
+def test_an_earlier_attempt_still_in_flight_after_five_minutes(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    in_flight = respond(
+        409,
+        {"error": "A request with this Idempotency-Key is currently being processed."},
+        {"Retry-After": "5"},
+    )
+    api.queue(httpx2.ReadTimeout("slow"), *[in_flight] * 70)
+
+    with pytest.raises(ConflictError) as exc:
+        client.workflows.run("665f", idempotency_key="acme-2026-05")
+
+    message = str(exc.value)
+    assert "still working on an earlier attempt" in message
+    assert "may yet go through: check before trying again" in message
+    assert "(Idempotency-Key: acme-2026-05)" in message
+    assert sum(clock.sleeps) <= 300 + 1
+
+
+def test_a_rate_limited_request_of_any_kind_is_retried(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    """Lodol checks its limits before doing anything, so even a delete, or a
+    write without a key, can be sent again after a 429."""
+    limited = respond(429, {"error": "Rate limit exceeded."}, {"Retry-After": "3"})
+    api.queue(limited, respond(200, {"id": "665f", "name": "x", "deleted": True}))
+    api.queue(limited, respond(200, {"ok": True}))
+
+    assert client.workflows.delete("665f").id == "665f"
+    assert client.request("POST", "/custom") == {"ok": True}
+    assert clock.sleeps == [3.0, 3.0]
+
+
+def test_a_key_makes_only_a_post_resendable(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(500, {"error": "temporary"}))
+
+    with pytest.raises(InternalServerError):
+        client.request("DELETE", "/workflows/665f", idempotency_key="k1")
+
+    assert len(api.requests) == 1
+
+
+def test_a_certificate_that_cant_be_verified_isnt_retried(
+    client: Lodol, api: FakeAPI
+) -> None:
+    failure = httpx2.ConnectError("certificate verify failed")
+    failure.__cause__ = ssl.SSLCertVerificationError(
+        1, "[SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in chain"
+    )
+    api.queue(failure)
+
+    with pytest.raises(APIConnectionError, match="set SSL_CERT_FILE"):
+        client.workflows.list()
+
+    assert len(api.requests) == 1
+
+
+def test_an_answer_that_cant_be_read(client: Lodol, api: FakeAPI) -> None:
+    api.queue(httpx2.DecodingError("bad gzip"))
+
+    with pytest.raises(APIConnectionError, match="couldn't be read: bad gzip"):
+        client.workflows.list()
+
+
+def test_the_same_inputs_are_sent_the_same_way(client: Lodol, api: FakeAPI) -> None:
+    """Lodol tells a retry from a new request by its exact bytes."""
+    api.queue(respond(202, run_json()), respond(202, run_json()))
+
+    client.workflows.run("665f", inputs={"client": "Acme", "month": "2026-05"})
+    client.workflows.run("665f", inputs={"month": "2026-05", "client": "Acme"})
+
+    assert api.requests[0].content == api.requests[1].content
+
+
+@pytest.mark.parametrize(
+    ("key", "error", "complaint"),
+    [
+        (123, TypeError, "must be text, not int"),
+        ("", ValueError, "is empty"),
+        ("   ", ValueError, "is empty"),
+        ("k" * 257, ValueError, "257 characters; Lodol takes at most 256"),
+    ],
+)
+def test_a_bad_idempotency_key_is_refused_before_sending(
+    client: Lodol, api: FakeAPI, key: object, error: type[Exception], complaint: str
+) -> None:
+    with pytest.raises(error, match=complaint):
+        client.workflows.run("665f", idempotency_key=key)  # type: ignore[arg-type]
+
+    assert api.requests == []
+
+
+def test_any_text_works_as_an_idempotency_key(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, run_json()), respond(202, run_json()))
+
+    client.workflows.run("665f", idempotency_key="monthly-report:Café Noël:2026-05")
+    client.workflows.run("665f", idempotency_key="monthly-report:Café Noël:2026-05")
+
+    first, second = (request.headers["Idempotency-Key"] for request in api.requests)
+    assert first == second == "monthly-report:Caf%C3%A9 No%C3%ABl:2026-05"
+
+
+def test_notes_the_workspaces_request_allowance(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            200,
+            {"workflows": []},
+            {
+                "X-RateLimit-Limit": "5",
+                "X-RateLimit-Remaining": "3",
+                "X-RateLimit-Reset": "41",
+            },
+        )
+    )
+
+    client.workflows.list()
+
+    assert client._rate_limit == _transport.RateLimit(limit=5, remaining=3, reset=41.0)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"X-RateLimit-Limit": "0", "X-RateLimit-Remaining": "0"},
+        {"X-RateLimit-Limit": "many", "X-RateLimit-Remaining": "1"},
+        {"X-RateLimit-Limit": "5"},
+    ],
+)
+def test_an_allowance_that_says_nothing_is_ignored(headers: dict[str, str]) -> None:
+    assert _transport.parse_rate_limit(httpx2.Headers(headers)) is None
+
+
+def test_a_certificate_failure_is_recognized_by_its_words_too() -> None:
+    error = httpx2.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get issuer")
+
+    assert _transport.is_certificate_error(error)
+    assert not _transport.is_certificate_error(httpx2.ConnectError("refused"))

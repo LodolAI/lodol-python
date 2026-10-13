@@ -133,3 +133,35 @@ async def test_the_journey_async(server: Server) -> None:
         assert len(pending) == 2
         await lodol.approvals.approve("a1")
         assert (await lodol.approvals.get("a1")).status == "approved"
+
+
+def test_a_slow_start_is_waited_for_not_repeated(server: Server) -> None:
+    """Over a real socket: the first attempt times out while the server is
+    still starting the run; the retry hears 409 + Retry-After until the
+    server can replay it. One run, not a conflict and not two."""
+    server.state.start_seconds = 1.0
+    server.state.in_flight_retry_after = "0.2"
+    with Lodol(api_key=KEY, base_url=address(server), timeout=0.3) as lodol:
+        run = lodol.workflows.run("665f", inputs={"client": "Acme"})
+
+    assert run.id == "r1"
+    assert len(server.state.runs) == 1
+
+
+def test_a_workflow_that_starts_itself(server: Server) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        with pytest.warns(UserWarning, match="it is now listening"):
+            run = lodol.workflows.run("9b2e", wait=True)
+
+    assert run.status == "running"
+
+
+def test_listed_runs_carry_no_error_but_the_run_does(server: Server) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        with pytest.raises(RunFailedError):
+            lodol.workflows.run("7a1c", wait=True)
+        (listed,) = lodol.runs.list()
+        fetched = lodol.runs.get(listed)
+
+    assert listed.error is None and listed.workflow_name == "Always fails"
+    assert fetched.error == "Sheet not found"

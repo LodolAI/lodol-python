@@ -263,9 +263,10 @@ def test_run_and_wait(client: Lodol, api: FakeAPI, clock: FakeClock) -> None:
         ("GET", "/executions/683b"),
         ("GET", "/executions/683b"),
     ]
-    # Polls are light; the step results come once, at the end.
+    # Polls are light; the step results come once, at the end. A run just
+    # started is certainly still queued, so the first check waits a second.
     assert api.sent(1)[2] == {} and api.sent(3)[2] == {"include_step_results": "true"}
-    assert clock.sleeps == [1.0]
+    assert clock.sleeps == [1.0, 1.5]
 
 
 def test_run_takes_the_workflow_itself(client: Lodol, api: FakeAPI) -> None:
@@ -320,3 +321,19 @@ def test_a_bad_timeout_is_refused_before_the_run_starts(
         client.workflows.run("665f", wait=True, timeout=timeout)  # type: ignore[arg-type]
 
     assert api.requests == []
+
+
+def test_a_workflow_that_starts_itself_isnt_waited_for(
+    client: Lodol, api: FakeAPI
+) -> None:
+    """Running it sets it listening, which never finishes: waiting would
+    never end, so it returns at once and says why."""
+    api.queue(respond(202, run_json(status="running", is_trigger_workflow=True)))
+
+    with pytest.warns(
+        UserWarning, match=r"no end to wait for: it is now listening \(run 683b\)"
+    ):
+        run = client.workflows.run("665f", wait=True)
+
+    assert run.status == "running"
+    assert len(api.requests) == 1

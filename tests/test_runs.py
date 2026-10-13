@@ -9,6 +9,7 @@ import pytest
 
 from lodol import (
     APIConnectionError,
+    APIResponseValidationError,
     BadRequestError,
     Lodol,
     NotFoundError,
@@ -19,7 +20,7 @@ from lodol import (
     WaitTimeoutError,
     Workflow,
 )
-from tests.conftest import FakeAPI, FakeClock, respond, run_json
+from tests.conftest import FakeAPI, FakeClock, approval_json, respond, run_json
 
 
 def runs_page(*ids: str) -> dict[str, list[dict[str, object]]]:
@@ -441,3 +442,209 @@ def test_a_timeout_doesnt_pass_off_an_old_status_as_current(
 
     assert "it couldn't be checked" in str(exc.value)
     assert exc.value.run is known
+
+
+# ── Waiting, under pressure ──────────────────────────────────────────────
+
+
+def test_a_run_that_succeeded_is_never_reported_as_an_error(
+    client: Lodol, api: FakeAPI, clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Once the run has finished, failing to fetch its step results doesn't
+    turn its outcome into an exception: it comes back without them."""
+    api.queue(
+        respond(200, run_json(status="success")),
+        *[httpx2.ConnectError("refused")] * 100,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="lodol"):
+        run = client.runs.wait("683b")
+
+    assert run.succeeded and run.steps is None
+    assert "its step results couldn't be fetched" in caplog.text
+
+
+def test_fetching_the_steps_rides_out_a_rate_limit(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(
+        respond(200, run_json(status="success")),
+        respond(429, {"error": "Rate limit exceeded."}, {"Retry-After": "20"}),
+        respond(
+            200, run_json(status="success", steps=[{"index": 0, "status": "completed"}])
+        ),
+    )
+
+    run = client.runs.wait("683b")
+
+    assert run.steps is not None
+    assert 20.0 in clock.sleeps
+
+
+def test_a_failed_run_raises_even_without_its_steps(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(
+        respond(200, run_json(status="failed", error="Sheet not found")),
+        *[httpx2.ConnectError("refused")] * 100,
+    )
+
+    with pytest.raises(RunFailedError, match="Sheet not found") as exc:
+        client.runs.wait("683b")
+
+    assert exc.value.run.steps is None
+
+
+def test_wait_keeps_its_deadline_through_rate_limits(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    """Each check gets no retries of its own and the wait paces them, so a
+    long Retry-After can't carry a wait past its deadline (0.1 slept 121s
+    of a 5s wait)."""
+    limited = respond(429, {"error": "Rate limit exceeded."}, {"Retry-After": "60"})
+    api.queue(respond(200, run_json(status="running")), *[limited] * 5)
+
+    with pytest.raises(WaitTimeoutError, match="after 5 seconds: it is still running"):
+        client.runs.wait("683b", timeout=5)
+
+    assert sum(clock.sleeps) <= 5
+    assert len(api.requests) <= 3
+
+
+def test_a_check_gets_no_longer_than_the_deadline_leaves(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(*[respond(200, run_json(status="running"))] * 3)
+
+    with pytest.raises(WaitTimeoutError):
+        client.runs.wait("683b", timeout=2.5)
+
+    read_timeouts = [request.extensions["timeout"]["read"] for request in api.requests]
+    assert read_timeouts[0] == 2.5
+    # Never less than a second, however close the deadline.
+    assert all(1.0 <= timeout <= 2.5 for timeout in read_timeouts)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_wait_never_sleeps_through_a_long_retry_after(
+    client: Lodol, api: FakeAPI, clock: FakeClock, status: int
+) -> None:
+    api.queue(
+        respond(status, {"error": "Down for maintenance"}, {"Retry-After": "86400"}),
+        respond(200, run_json(status="success")),
+    )
+
+    client.runs.wait("683b", include_steps=False)
+
+    assert max(clock.sleeps) == 60.0
+
+
+def allowance(limit: int, remaining: int, reset: float) -> dict[str, str]:
+    return {
+        "X-RateLimit-Limit": str(limit),
+        "X-RateLimit-Remaining": str(remaining),
+        "X-RateLimit-Reset": str(reset),
+    }
+
+
+def test_wait_paces_itself_to_the_workspaces_allowance(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    """On the Free plan's 5 requests a minute, one wait alone never checks
+    more often than every 12 seconds."""
+    running = respond(200, run_json(status="running"), allowance(5, 4, 50))
+    api.queue(*[running] * 4, respond(200, run_json(status="success")))
+
+    client.runs.wait("683b", include_steps=False)
+
+    assert clock.sleeps == [12.0, 12.0, 12.0, 12.0]
+
+
+def test_wait_holds_off_while_the_allowance_is_used_up(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(
+        respond(200, run_json(status="running"), allowance(200, 0, 37)),
+        respond(200, run_json(status="success"), allowance(200, 199, 60)),
+        respond(200, run_json(status="success", steps=[]), allowance(200, 198, 59)),
+    )
+
+    run = client.runs.wait("683b")
+
+    assert run.steps == []
+    assert clock.sleeps == [37.0]
+
+
+def test_a_run_just_started_isnt_checked_at_once(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    def check(request: httpx2.Request) -> httpx2.Response:
+        assert clock.sleeps, "checked before any wait"
+        return respond(200, run_json(status="success"))
+
+    api.queue(check)
+
+    client.runs.wait(Run(id="683b", status="queued"), include_steps=False)
+
+
+def test_a_run_given_by_id_is_checked_at_once(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(respond(200, run_json(status="success")))
+
+    client.runs.wait("683b", include_steps=False)
+
+    assert clock.sleeps == []
+
+
+def test_wait_says_what_a_stopping_run_is_doing(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(*[respond(200, run_json(status="stopping"))] * 3)
+
+    with pytest.raises(WaitTimeoutError, match="it is stopping"):
+        client.runs.wait("683b", timeout=2)
+
+
+# ── Paging, defensively ──────────────────────────────────────────────────
+
+
+def test_a_page_longer_than_asked_for_is_cut_to_size(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(
+        respond(200, runs_page(*[f"r{i}" for i in range(150)])),
+        respond(200, runs_page()),
+    )
+
+    ids = [run.id for run in client.runs.list()]
+
+    # Nothing skipped: the next page starts after the last run yielded.
+    assert ids == [f"r{i}" for i in range(100)]
+    assert api.sent(1)[2]["after"] == "r99"
+
+
+def test_a_page_that_repeats_is_refused(client: Lodol, api: FakeAPI) -> None:
+    page = {"approvals": [approval_json(id="a1")], "next_before": "a1"}
+    api.queue(respond(200, page), respond(200, page))
+
+    with pytest.raises(APIResponseValidationError, match="page after 'a1' again"):
+        list(client.approvals.list(limit=5))
+
+
+def test_a_run_that_finishes_at_the_deadline_comes_back_without_steps(
+    client: Lodol, api: FakeAPI, clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The outcome is known; fetching the steps would mean waiting out the
+    rate limit past the deadline, so the run comes back without them."""
+    api.queue(
+        respond(200, run_json(status="running")),
+        respond(200, run_json(status="success"), allowance(200, 0, 30)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="lodol"):
+        run = client.runs.wait("683b", timeout=5)
+
+    assert run.succeeded and run.steps is None
+    assert len(api.requests) == 2
+    assert "no time left before the wait's deadline" in caplog.text
