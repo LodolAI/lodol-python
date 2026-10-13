@@ -475,15 +475,12 @@ def status_error(response: httpx2.Response) -> APIStatusError:
                 body=body,
                 response=response,
             )
-        # A server from before error codes said this only in words.
-        if code == "concurrency_limit" or (
-            code is None and message.startswith("Concurrent execution limit")
-        ):
+        if code == "concurrency_limit":
             return ConcurrencyLimitError(
                 message,
                 status_code=status,
                 retry_after=retry_after,
-                code=code or "concurrency_limit",
+                code=code,
                 body=body,
                 response=response,
             )

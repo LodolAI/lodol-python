@@ -256,11 +256,7 @@ class Run:
             version_id=_optional_str(raw.get("version_id")),
             error=_optional_str(raw.get("error")),
             outputs=dict(outputs) if isinstance(outputs, Mapping) else {},
-            # A server from before the flag says so only of a run it just
-            # started, as ``is_trigger_workflow``.
-            is_trigger_listener=bool(
-                raw.get("is_trigger_listener", raw.get("is_trigger_workflow"))
-            ),
+            is_trigger_listener=bool(raw.get("is_trigger_listener")),
             created_at=parse_datetime(raw.get("created_at")),
             started_at=parse_datetime(raw.get("started_at")),
             completed_at=parse_datetime(raw.get("completed_at")),

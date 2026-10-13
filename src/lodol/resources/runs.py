@@ -519,8 +519,4 @@ def _stop_request(run_id: str) -> APIRequest:
 
 def _already_finished(error: BadRequestError) -> bool:
     """Whether a stop was refused because the run had already finished."""
-    if error.code is not None:
-        return error.code == "run_already_finished"
-    # A server from before error codes said so only in words: "Execution
-    # already success" (or failed, or stopped).
-    return error.message.startswith("Execution already")
+    return error.code == "run_already_finished"

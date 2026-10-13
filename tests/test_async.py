@@ -119,7 +119,10 @@ async def test_list_with_a_limit(aclient: AsyncLodol, api: FakeAPI) -> None:
 
 async def test_stop(aclient: AsyncLodol, api: FakeAPI) -> None:
     api.queue(
-        respond(400, {"error": "Execution already failed"}),
+        respond(
+            400,
+            {"error": "Execution already failed", "error_code": "run_already_finished"},
+        ),
         respond(200, run_json(status="failed")),
     )
 
@@ -262,7 +265,7 @@ async def test_wait_keeps_its_deadline(
 async def test_a_workflow_that_starts_itself_isnt_waited_for(
     aclient: AsyncLodol, api: FakeAPI
 ) -> None:
-    api.queue(respond(202, run_json(status="running", is_trigger_workflow=True)))
+    api.queue(respond(202, run_json(status="running", is_trigger_listener=True)))
 
     with pytest.warns(UserWarning, match="it is listening"):
         run = await aclient.workflows.run("665f", wait=True)

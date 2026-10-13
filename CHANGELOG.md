@@ -21,7 +21,7 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - Models can be hashed, and errors can be pickled, so both cross process boundaries (multiprocessing, task queues).
 - `LODOL_LOG=info` or `LODOL_LOG=debug` turns on logging.
 
-Outputs, `is_trigger_listener` and `request_id` come from Lodol as of October 2026. Against an older Lodol Local, `run.outputs` is empty, `request_id` is `None`, and only a run just started knows it is listening; the rest works as before.
+0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener` and `request_id` the SDK relies on. Update an older Lodol Local before upgrading.
 
 ### Fixed
 

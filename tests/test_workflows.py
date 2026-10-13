@@ -328,7 +328,7 @@ def test_a_workflow_that_starts_itself_isnt_waited_for(
 ) -> None:
     """Running it sets it listening, which never finishes: waiting would
     never end, so it returns at once and says why."""
-    api.queue(respond(202, run_json(status="running", is_trigger_workflow=True)))
+    api.queue(respond(202, run_json(status="running", is_trigger_listener=True)))
 
     with pytest.warns(
         UserWarning, match=r"no end to wait for: it is listening \(run 683b\)"

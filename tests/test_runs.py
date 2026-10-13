@@ -396,22 +396,19 @@ def test_stop(client: Lodol, api: FakeAPI) -> None:
     assert run.status == "stopping"
 
 
-@pytest.mark.parametrize(
-    "refusal",
-    [
-        {"error": "Execution already success", "error_code": "run_already_finished"},
-        # A server from before error codes says so only in words.
-        {"error": "Execution already success"},
-    ],
-    ids=["by code", "by wording"],
-)
 def test_stopping_a_run_that_already_finished_returns_it(
-    client: Lodol, api: FakeAPI, refusal: dict[str, str]
+    client: Lodol, api: FakeAPI
 ) -> None:
     """A run that finishes just as it is stopped (a wait timed out, say) is
     no error: it is returned as it finished."""
     api.queue(
-        respond(400, refusal),
+        respond(
+            400,
+            {
+                "error": "Execution already success",
+                "error_code": "run_already_finished",
+            },
+        ),
         respond(200, run_json(status="success")),
     )
 
@@ -428,12 +425,8 @@ def test_stop_raises_other_refusals(client: Lodol, api: FakeAPI) -> None:
         client.runs.stop("683b")
 
 
-def test_stop_goes_by_the_code_over_the_wording(client: Lodol, api: FakeAPI) -> None:
-    api.queue(
-        respond(
-            400, {"error": "Execution already odd", "error_code": "invalid_request"}
-        )
-    )
+def test_stop_goes_by_the_code_not_the_wording(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(400, {"error": "Execution already success"}))
 
     with pytest.raises(BadRequestError):
         client.runs.stop("683b")

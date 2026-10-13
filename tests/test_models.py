@@ -250,17 +250,10 @@ def test_a_run_without_outputs_has_none() -> None:
     assert Run.from_api({"execution_id": "683b", "outputs": None}).outputs == {}
 
 
-@pytest.mark.parametrize(
-    "fields",
-    [
-        {"is_trigger_listener": True},
-        # A server from before the flag says so only of a run it just started.
-        {"is_trigger_workflow": True},
-    ],
-    ids=["flag", "older server"],
-)
-def test_a_listener_is_marked(fields: dict[str, bool]) -> None:
-    run = Run.from_api({"execution_id": "683b", "status": "running", **fields})
+def test_a_listener_is_marked() -> None:
+    run = Run.from_api(
+        {"execution_id": "683b", "status": "running", "is_trigger_listener": True}
+    )
 
     assert run.is_trigger_listener
     assert not run.finished
