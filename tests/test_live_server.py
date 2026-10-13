@@ -139,9 +139,11 @@ def test_a_slow_start_is_waited_for_not_repeated(server: Server) -> None:
     """Over a real socket: the first attempt times out while the server is
     still starting the run; the retry hears 409 + Retry-After until the
     server can replay it. One run, not a conflict and not two."""
-    server.state.start_seconds = 1.0
+    # Margins wide enough for a busy machine: the first attempt gives up at
+    # 0.5s, a second into a 1.5s start, and each 409 comes back at once.
+    server.state.start_seconds = 1.5
     server.state.in_flight_retry_after = "0.2"
-    with Lodol(api_key=KEY, base_url=address(server), timeout=0.3) as lodol:
+    with Lodol(api_key=KEY, base_url=address(server), timeout=0.5) as lodol:
         run = lodol.workflows.run("665f", inputs={"client": "Acme"})
 
     assert run.id == "r1"
