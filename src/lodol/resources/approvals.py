@@ -9,7 +9,7 @@ key's.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 from lodol._transport import (
     APIRequest,
@@ -26,7 +26,7 @@ from lodol.resources._common import object_id
 if TYPE_CHECKING:  # pragma: no cover - only for type hints
     from lodol.client import AsyncLodol, Lodol
 
-ApprovalRef = Union[str, Approval]
+ApprovalRef = str | Approval
 
 _STATUS_FILTERS = ("pending", "decided", "all")
 

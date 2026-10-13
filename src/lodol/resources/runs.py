@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 from lodol import _transport, constants
 from lodol._transport import (
@@ -32,8 +32,8 @@ from lodol.resources._common import object_id
 if TYPE_CHECKING:  # pragma: no cover - only for type hints
     from lodol.client import AsyncLodol, Lodol
 
-RunRef = Union[str, Run]
-WorkflowRef = Union[str, Workflow]
+RunRef = str | Run
+WorkflowRef = str | Workflow
 
 logger = logging.getLogger("lodol")
 
@@ -266,7 +266,7 @@ class _Waiting:
         now = _transport.monotonic()
         self._deadline = None if self.timeout is None else now + self.timeout
         self._interval = constants.INITIAL_POLL_INTERVAL
-        self._failing_since: Optional[float] = None
+        self._failing_since: float | None = None
         self._looked = False
         self._last_status = known.status if known is not None else None
 

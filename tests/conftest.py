@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Callable, Iterator
-from typing import Any, Union
+from typing import Any
 
 import httpx2
 import pytest
@@ -12,7 +12,7 @@ from tests import standin
 
 API = "https://api-prod.lodol.com/api/v1"
 
-Reply = Union[httpx2.Response, Exception, Callable[[httpx2.Request], httpx2.Response]]
+Reply = httpx2.Response | Exception | Callable[[httpx2.Request], httpx2.Response]
 
 
 def respond(

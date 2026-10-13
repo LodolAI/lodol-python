@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Mapping, Sequence, TypeVar, Union
+from typing import Any, Mapping, Sequence, TypeVar
 from urllib.parse import quote, urlsplit
 
 import anyio
@@ -71,7 +71,7 @@ def monotonic() -> float:
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-QueryParams = Mapping[str, Union[str, Sequence[str]]]
+QueryParams = Mapping[str, str | Sequence[str]]
 
 
 @dataclass(frozen=True)

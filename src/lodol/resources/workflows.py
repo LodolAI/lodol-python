@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Any, Mapping, Union
+from typing import TYPE_CHECKING, Any, Mapping
 
 from lodol._transport import (
     APIRequest,
@@ -22,7 +22,7 @@ from lodol.resources.runs import check_wait_timeout
 if TYPE_CHECKING:  # pragma: no cover - only for type hints
     from lodol.client import AsyncLodol, Lodol
 
-WorkflowRef = Union[str, Workflow]
+WorkflowRef = str | Workflow
 
 
 class Workflows:
