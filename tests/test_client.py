@@ -1,711 +1,167 @@
+"""Setting up a client: the key, the address, limits, and the escape hatch."""
+
 from __future__ import annotations
 
-from typing import Any
-
+import httpx2
 import pytest
-import requests
 
 import lodol
-import lodol.constants as constants
-from lodol import (
-    APIConnectionError,
-    APIResponseValidationError,
-    AuthenticationError,
-    BadRequestError,
-    ConfigurationError,
-    ConflictError,
-    DeletedWorkflow,
-    Lodol,
-    LodolTimeoutError,
-    NotFoundError,
-    PermissionDeniedError,
-    RateLimitError,
-    Workflow,
-    WorkflowInput,
-)
-from lodol.client import USER_AGENT
+from lodol import ConfigurationError, Lodol
+from lodol.constants import USER_AGENT
+from tests.conftest import API, FakeAPI, respond
 
 
-class FakeResponse:
-    def __init__(self, status_code: int, body: Any = None, headers: dict[str, str] | None = None):
-        self.status_code = status_code
-        self._body = body
-        self.headers = headers or {}
-        self.content = b"" if body is None else b"{}"
-        self.text = "" if body is None else str(body)
+def test_reads_the_key_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LODOL_API_KEY", " sk_live_env\n")
 
-    def json(self) -> Any:
-        if self._body == "<invalid-json>":
-            raise ValueError("invalid json")
-        return self._body
+    assert Lodol().api_key == "sk_live_env"
 
 
-class FakeSession:
-    def __init__(self, responses: list[Any]):
-        self.responses = list(responses)
-        self.requests: list[tuple[str, str, dict[str, Any]]] = []
-        self.closed = False
+def test_an_explicit_key_wins_over_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LODOL_API_KEY", "sk_live_env")
 
-    def request(self, method: str, url: str, **kwargs: Any) -> Any:
-        self.requests.append((method, url, kwargs))
-        if not self.responses:
-            raise AssertionError("No fake response queued")
-        response = self.responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-    def close(self) -> None:
-        self.closed = True
+    assert Lodol(api_key="sk_live_arg").api_key == "sk_live_arg"
 
 
-def make_client(responses: list[Any], **kwargs: Any) -> Lodol:
-    return Lodol(
-        api_key="sk_live_test",
-        session=FakeSession(responses),  # type: ignore[arg-type]
-        max_retries=0,
-        **kwargs,
-    )
-
-
-def test_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("LODOL_API_KEY", raising=False)
-
-    with pytest.raises(ConfigurationError):
+def test_a_missing_key_says_where_to_get_one() -> None:
+    with pytest.raises(ConfigurationError, match="Settings > API Keys"):
         Lodol()
 
 
-def test_reads_lodol_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LODOL_API_KEY", "sk_live_env")
-    client = Lodol(session=FakeSession([]))  # type: ignore[arg-type]
+def test_the_key_never_appears_in_the_repr() -> None:
+    client = Lodol(api_key="sk_live_secret")
 
-    assert client.api_key == "sk_live_env"
+    assert "sk_live_secret" not in repr(client)
+    assert repr(client) == f"Lodol(base_url='{API}')"
 
 
-def test_uses_default_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LODOL_API_KEY", "sk_live_env")
-    monkeypatch.setattr(constants, "DEFAULT_BASE_URL", "https://example.test/api/v1/")
-
-    client = Lodol(session=FakeSession([]))  # type: ignore[arg-type]
-
-    assert client.base_url == "https://example.test/api/v1"
-
-
-def test_rejects_http_default_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(constants, "DEFAULT_BASE_URL", "http://example.test/api/v1")
-
-    with pytest.raises(ConfigurationError, match="must use HTTPS"):
-        Lodol(api_key="sk_live_test", session=FakeSession([]))  # type: ignore[arg-type]
-
-
-def test_requests_use_client_base_url_cached_at_construction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = make_client([FakeResponse(200, {"workflows": []})])
-    monkeypatch.setattr(constants, "DEFAULT_BASE_URL", "http://example.test/api/v1")
-
-    assert client.workflows.list() == []
-    method, url, _kwargs = client._session.requests[0]  # type: ignore[attr-defined]
-    assert method == "GET"
-    assert url == "https://api-prod.lodol.com/api/v1/workflows"
-
-
-def test_list_workflows() -> None:
-    client = make_client(
-        [
-            FakeResponse(
-                200,
-                {
-                    "workflows": [
-                        {
-                            "id": "665f",
-                            "name": "Daily report",
-                            "description": "Send a report",
-                        }
-                    ]
-                },
-            )
-        ]
-    )
-
-    workflows = client.workflows.list()
-
-    assert workflows[0].id == "665f"
-    assert workflows[0].name == "Daily report"
-    method, url, kwargs = client._session.requests[0]  # type: ignore[attr-defined]
-    assert method == "GET"
-    assert url == f"{constants.DEFAULT_BASE_URL}/workflows"
-    assert kwargs["headers"]["Authorization"] == "Bearer sk_live_test"
-    assert kwargs["headers"]["User-Agent"] == f"lodol-python/{lodol.__version__}"
-    assert kwargs["headers"]["User-Agent"] == USER_AGENT
-
-
-def test_list_workflows_rejects_non_object_response() -> None:
-    client = make_client([FakeResponse(200, ["not", "an", "object"])])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.workflows.list()
-
-    assert "GET /workflows returned list, expected object" in str(exc.value)
-
-
-def test_list_workflows_rejects_non_list_workflows_field() -> None:
-    client = make_client([FakeResponse(200, {"workflows": "not-a-list"})])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.workflows.list()
-
-    assert "field 'workflows' returned str, expected list" in str(exc.value)
-
-
-def test_list_workflows_rejects_non_object_items() -> None:
-    client = make_client([FakeResponse(200, {"workflows": ["not-an-object"]})])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.workflows.list()
-
-    assert "field 'workflows'[0] returned str, expected object" in str(exc.value)
-
-
-def test_retrieve_workflow_aliases_get() -> None:
-    client = make_client(
-        [FakeResponse(200, {"id": "665f", "name": "Daily report", "program": {"steps": []}})]
-    )
-
-    workflow = client.workflows.get("665f")
-
-    assert workflow.program == {"steps": []}
-
-
-def test_retrieve_workflow_rejects_non_object_response() -> None:
-    client = make_client([FakeResponse(200, ["not-an-object"])])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.workflows.retrieve("665f")
-
-    assert "GET /workflows/{workflow_id} returned list, expected object" in str(exc.value)
-
-
-def test_run_workflow_adds_idempotency_key() -> None:
-    client = make_client(
-        [
-            FakeResponse(
-                202,
-                {
-                    "execution_id": "683b",
-                    "workflow_id": "665f",
-                    "status": "running",
-                },
-            )
-        ]
-    )
-
-    execution = client.workflows.run("665f")
-
-    assert execution.execution_id == "683b"
-    headers = client._session.requests[0][2]["headers"]  # type: ignore[attr-defined]
-    assert headers["Idempotency-Key"].startswith("lodol-workflow-run-")
-
-
-def test_run_workflow_without_inputs_sends_no_body() -> None:
-    client = make_client(
-        [FakeResponse(202, {"execution_id": "683b", "workflow_id": "665f", "status": "queued"})]
-    )
-
-    client.workflows.run("665f")
-
-    kwargs = client._session.requests[0][2]  # type: ignore[attr-defined]
-    assert kwargs["json"] is None
-
-
-def test_run_workflow_sends_inputs() -> None:
-    client = make_client(
-        [FakeResponse(202, {"execution_id": "683b", "workflow_id": "665f", "status": "queued"})]
-    )
-
-    client.workflows.run("665f", inputs={"client": "Acme", "count": 2})
-
-    method, url, kwargs = client._session.requests[0]  # type: ignore[attr-defined]
-    assert method == "POST"
-    assert url == f"{constants.DEFAULT_BASE_URL}/workflows/665f/run-async"
-    assert kwargs["json"] == {"inputs": {"client": "Acme", "count": 2}}
-    assert kwargs["headers"]["Content-Type"] == "application/json"
-
-
-def test_run_workflow_rejects_inputs_that_are_not_a_mapping() -> None:
-    client = make_client([])
-
-    with pytest.raises(TypeError, match="mapping of input names to values"):
-        client.workflows.run("665f", inputs=[("client", "Acme")])  # type: ignore[arg-type]
-
-    assert client._session.requests == []  # type: ignore[attr-defined]
-
-
-def test_run_workflow_refused_inputs_raise_bad_request() -> None:
-    client = make_client(
-        [
-            FakeResponse(
-                400,
-                {"error": "'Monthly report' needs a value for its 'client' input."},
-            )
-        ]
-    )
-
-    with pytest.raises(BadRequestError) as exc:
-        client.workflows.run("665f", inputs={})
-
-    assert exc.value.status_code == 400
-    assert "'client' input" in str(exc.value)
-
-
-def test_run_reports_the_workflow_and_the_version_that_ran() -> None:
-    client = make_client(
-        [
-            FakeResponse(
-                202,
-                {
-                    "execution_id": "683b",
-                    "workflow_id": "665f",
-                    "version_id": "6683",
-                    "status": "queued",
-                },
-            )
-        ]
-    )
-
-    execution = client.workflows.run("665f")
-
-    assert execution.workflow_id == "665f"
-    assert execution.version_id == "6683"
-
-
-def test_retried_run_resends_the_same_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
-    session = FakeSession([
-        requests.ConnectionError("down"),
-        FakeResponse(202, {"execution_id": "e1", "workflow_id": "w1", "status": "queued"}),
-    ])
-    client = Lodol(
-        api_key="sk_live_test",
-        session=session,  # type: ignore[arg-type]
-        max_retries=1,
-    )
-    monkeypatch.setattr("lodol.client.time.sleep", lambda _seconds: None)
-
-    client.workflows.run("w1", inputs={"client": "Acme"})
-
-    first, second = (kwargs for _method, _url, kwargs in session.requests)
-    assert first["json"] == second["json"] == {"inputs": {"client": "Acme"}}
-    assert first["headers"]["Idempotency-Key"] == second["headers"]["Idempotency-Key"]
-
-
-def test_workflow_lists_its_inputs() -> None:
-    client = make_client(
-        [
-            FakeResponse(
-                200,
-                {
-                    "id": "665f",
-                    "name": "Monthly report",
-                    "inputs": [
-                        {
-                            "name": "client",
-                            "type": "text",
-                            "required": True,
-                            "default": None,
-                            "description": "Who it's for",
-                        },
-                        {
-                            "name": "month",
-                            "type": "text",
-                            "required": False,
-                            "default": "this month",
-                            "description": "",
-                        },
-                    ],
-                },
-            )
-        ]
-    )
-
-    workflow = client.workflows.retrieve("665f")
-
-    assert workflow.inputs == [
-        WorkflowInput(name="client", type="text", required=True, description="Who it's for"),
-        WorkflowInput(name="month", type="text", required=False, default="this month"),
-    ]
-
-
-def test_workflow_without_inputs_lists_none() -> None:
-    client = make_client([FakeResponse(200, {"id": "665f", "name": "Daily report"})])
-
-    assert client.workflows.retrieve("665f").inputs == []
-
-
-def test_workflow_run_passes_inputs() -> None:
-    client = make_client(
-        [
-            FakeResponse(200, {"workflows": [{"id": "665f", "name": "Monthly report"}]}),
-            FakeResponse(202, {"execution_id": "683b", "workflow_id": "665f", "status": "queued"}),
-        ]
-    )
-
-    workflow = client.workflows.list()[0]
-    workflow.run(inputs={"client": "Acme"})
-
-    method, url, kwargs = client._session.requests[1]  # type: ignore[attr-defined]
-    assert (method, url) == ("POST", f"{constants.DEFAULT_BASE_URL}/workflows/665f/run-async")
-    assert kwargs["json"] == {"inputs": {"client": "Acme"}}
-
-
-def test_run_workflow_rejects_non_object_response() -> None:
-    client = make_client([FakeResponse(202, ["not-an-object"])])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.workflows.run("665f")
-
-    assert (
-        "POST /workflows/{workflow_id}/run-async returned list, expected object"
-        in str(exc.value)
-    )
-    assert exc.value.status_code == 202
-
-
-def test_run_workflow_uses_custom_idempotency_key() -> None:
-    client = make_client(
-        [
-            FakeResponse(
-                202,
-                {
-                    "execution_id": "683b",
-                    "workflow_id": "665f",
-                    "status": "running",
-                },
-            )
-        ]
-    )
-
-    client.workflows.run("665f", idempotency_key="job-123")
-
-    headers = client._session.requests[0][2]["headers"]  # type: ignore[attr-defined]
-    assert headers["Idempotency-Key"] == "job-123"
-
-
-def test_get_execution_with_step_results() -> None:
-    client = make_client(
-        [
-            FakeResponse(
-                200,
-                {
-                    "execution_id": "683b",
-                    "workflow_id": "665f",
-                    "status": "success",
-                    "steps": [{"index": 0, "status": "completed"}],
-                },
-            )
-        ]
-    )
-
-    execution = client.executions.retrieve("683b", include_step_results=True)
-
-    assert execution.status == "success"
-    assert execution.steps == [{"index": 0, "status": "completed"}]
-    assert client._session.requests[0][2]["params"] == {  # type: ignore[attr-defined]
-        "include_step_results": "true"
-    }
-
-
-def test_list_executions_with_filters() -> None:
-    client = make_client([FakeResponse(200, {"executions": [{"execution_id": "e1", "status": "success"}]})])
-
-    executions = client.executions.list(workflow_id="w1", limit=5, after="e0")
-
-    assert executions[0].id == "e1"
-    assert client._session.requests[0][2]["params"] == {  # type: ignore[attr-defined]
-        "workflow_id": "w1",
-        "limit": 5,
-        "after": "e0",
-    }
-
-
-def test_list_executions_rejects_non_object_items() -> None:
-    client = make_client([FakeResponse(200, {"executions": ["not-an-object"]})])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.executions.list()
-
-    assert "field 'executions'[0] returned str, expected object" in str(exc.value)
-
-
-def test_list_executions_rejects_non_object_response() -> None:
-    client = make_client([FakeResponse(200, ["not-an-object"])])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.executions.list()
-
-    assert "GET /executions returned list, expected object" in str(exc.value)
-
-
-def test_retrieve_execution_rejects_non_object_response() -> None:
-    client = make_client([FakeResponse(200, "not-an-object")])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.executions.retrieve("683b")
-
-    assert "GET /executions/{execution_id} returned str, expected object" in str(exc.value)
-
-
-def test_stop_execution_adds_idempotency_key() -> None:
-    client = make_client([FakeResponse(200, {"execution_id": "e1", "status": "stopping"})])
-
-    execution = client.executions.stop("e1")
-
-    assert execution.status == "stopping"
-    headers = client._session.requests[0][2]["headers"]  # type: ignore[attr-defined]
-    assert headers["Idempotency-Key"].startswith("lodol-execution-stop-")
-
-
-def test_stop_execution_rejects_non_object_response() -> None:
-    client = make_client([FakeResponse(200, "not-an-object")])
-
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.executions.stop("e1")
-
-    assert (
-        "POST /executions/{execution_id}/stop returned str, expected object"
-        in str(exc.value)
-    )
-
-
-def test_wait_polls_until_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = make_client(
-        [
-            FakeResponse(200, {"execution_id": "683b", "status": "running"}),
-            FakeResponse(200, {"execution_id": "683b", "status": "success"}),
-        ]
-    )
-    monkeypatch.setattr("lodol.client.time.sleep", lambda _seconds: None)
-
-    execution = client.executions.wait("683b", poll_interval=0.01)
-
-    assert execution.status == "success"
-    assert len(client._session.requests) == 2  # type: ignore[attr-defined]
-
-
-def test_wait_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = make_client(
-        [
-            FakeResponse(200, {"execution_id": "683b", "status": "running"}),
-        ]
-    )
-    monkeypatch.setattr("lodol.client.time.sleep", lambda _seconds: None)
-
-    with pytest.raises(LodolTimeoutError):
-        client.executions.wait("683b", poll_interval=1, timeout=0)
+def test_defaults_to_lodol_cloud() -> None:
+    assert Lodol(api_key="k").base_url == API
 
 
 @pytest.mark.parametrize(
-    ("status_code", "error_type"),
+    ("given", "expected"),
     [
-        (401, AuthenticationError),
-        (404, NotFoundError),
-        (409, ConflictError),
-        (429, RateLimitError),
+        ("https://lodol.example.com/api/v1", "https://lodol.example.com/api/v1"),
+        ("https://lodol.example.com/api/v1/", "https://lodol.example.com/api/v1"),
+        # A bare host is the address people copy; the API's path is implied.
+        ("https://lodol.example.com", "https://lodol.example.com/api/v1"),
+        ("https://lodol.example.com/", "https://lodol.example.com/api/v1"),
+        # Lodol Local serves plain HTTP on this machine.
+        ("http://localhost:3901", "http://localhost:3901/api/v1"),
+        ("http://127.0.0.1:3901/api/v1", "http://127.0.0.1:3901/api/v1"),
+        ("http://[::1]:3901", "http://[::1]:3901/api/v1"),
+        ("http://lodol.localhost:3901", "http://lodol.localhost:3901/api/v1"),
+        # Lodol Local, from a script in a container on the same machine.
+        ("http://host.docker.internal:3901", "http://host.docker.internal:3901/api/v1"),
     ],
 )
-def test_error_mapping(status_code: int, error_type: type[Exception]) -> None:
-    client = make_client(
-        [
-            FakeResponse(
-                status_code,
-                {"error": "API failed"},
-                headers={"Retry-After": "5"},
-            )
-        ]
-    )
-
-    with pytest.raises(error_type) as exc:
-        client.workflows.list()
-
-    assert getattr(exc.value, "status_code") == status_code
-    assert str(exc.value) == "API failed"
+def test_base_url(given: str, expected: str) -> None:
+    assert Lodol(api_key="k", base_url=given).base_url == expected
 
 
-def test_invalid_success_json_raises_validation_error() -> None:
-    client = make_client([FakeResponse(200, "<invalid-json>")])
+def test_base_url_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LODOL_BASE_URL", "http://localhost:3901")
 
-    with pytest.raises(APIResponseValidationError):
-        client.workflows.list()
-
-
-def test_retries_get_transient_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    session = FakeSession([
-        FakeResponse(500, {"error": "temporary"}),
-        FakeResponse(200, {"workflows": []}),
-    ])
-    client = Lodol(
-        api_key="sk_live_test",
-        session=session,  # type: ignore[arg-type]
-        max_retries=1,
-    )
-    monkeypatch.setattr("lodol.client.time.sleep", lambda _seconds: None)
-
-    assert client.workflows.list() == []
-    assert len(session.requests) == 2
-
-
-def test_does_not_retry_conflict_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    session = FakeSession([
-        FakeResponse(409, {"error": "Idempotency key conflict"}),
-        FakeResponse(200, {"workflows": []}),
-    ])
-    client = Lodol(
-        api_key="sk_live_test",
-        session=session,  # type: ignore[arg-type]
-        max_retries=1,
-    )
-    monkeypatch.setattr("lodol.client.time.sleep", lambda _seconds: None)
-
-    with pytest.raises(ConflictError):
-        client.workflows.list()
-
-    assert len(session.requests) == 1
-
-
-def test_retries_idempotent_post_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    session = FakeSession([
-        requests.ConnectionError("down"),
-        FakeResponse(202, {"execution_id": "e1", "workflow_id": "w1", "status": "running"}),
-    ])
-    client = Lodol(
-        api_key="sk_live_test",
-        session=session,  # type: ignore[arg-type]
-        max_retries=1,
-    )
-    monkeypatch.setattr("lodol.client.time.sleep", lambda _seconds: None)
-
-    execution = client.workflows.run("w1", idempotency_key="same-job")
-
-    assert execution.id == "e1"
-    assert len(session.requests) == 2
-
-
-def test_non_idempotent_post_network_error_not_retried() -> None:
-    session = FakeSession([requests.ConnectionError("down")])
-    client = Lodol(
-        api_key="sk_live_test",
-        session=session,  # type: ignore[arg-type]
-        max_retries=1,
-    )
-
-    with pytest.raises(APIConnectionError):
-        client.request("POST", "/custom")
-
-    assert len(session.requests) == 1
-
-
-def test_with_options_merges_headers() -> None:
-    client = Lodol(
-        api_key="sk_live_test",
-        default_headers={"X-A": "1"},
-    )
-
-    other = client.with_options(default_headers={"X-B": "2"}, timeout=5)
-
-    assert other.timeout == 5
-    assert other.default_headers == {"X-A": "1", "X-B": "2"}
-
-
-def test_delete_workflow() -> None:
-    client = make_client(
-        [FakeResponse(200, {"id": "665f", "name": "Old report", "deleted": True})]
-    )
-
-    deleted = client.workflows.delete("665f")
-
-    assert isinstance(deleted, DeletedWorkflow)
-    assert (deleted.id, deleted.name, deleted.deleted) == ("665f", "Old report", True)
-    method, url, kwargs = client._session.requests[0]  # type: ignore[attr-defined]
-    assert method == "DELETE"
-    assert url == "https://api-prod.lodol.com/api/v1/workflows/665f"
-    assert kwargs["json"] is None
-    # No idempotency key: repeating a delete is a 404, not a duplicate.
-    assert "Idempotency-Key" not in kwargs["headers"]
-
-
-def test_delete_workflow_escapes_the_id() -> None:
-    client = make_client([FakeResponse(200, {"id": "x", "name": "", "deleted": True})])
-
-    client.workflows.delete("a/b c")
-
-    _method, url, _kwargs = client._session.requests[0]  # type: ignore[attr-defined]
-    assert url.endswith("/workflows/a%2Fb%20c")
-
-
-def test_workflow_delete_uses_its_id() -> None:
-    client = make_client(
-        [
-            FakeResponse(200, {"id": "665f", "name": "Old report", "program": {}}),
-            FakeResponse(200, {"id": "665f", "name": "Old report", "deleted": True}),
-        ]
-    )
-    workflow = client.workflows.retrieve("665f")
-
-    deleted = workflow.delete()
-
-    assert deleted.id == "665f"
-    method, url, _kwargs = client._session.requests[1]  # type: ignore[attr-defined]
-    assert (method, url) == ("DELETE", "https://api-prod.lodol.com/api/v1/workflows/665f")
-
-
-def test_detached_workflow_cannot_delete() -> None:
-    with pytest.raises(RuntimeError, match="not attached"):
-        Workflow(id="665f", name="Old report").delete()
+    assert Lodol(api_key="k").base_url == "http://localhost:3901/api/v1"
 
 
 @pytest.mark.parametrize(
-    ("status_code", "message", "error_type"),
-    [
-        (403, "API key lacks required scope(s)", PermissionDeniedError),
-        (
-            403,
-            "The member this API key acts for is not allowed to delete workflows "
-            "in this workspace",
-            PermissionDeniedError,
-        ),
-        (404, "Workflow not found", NotFoundError),
-    ],
+    "remote", ["http://lodol.example.com", "http://192.168.1.20:3901"]
 )
-def test_delete_workflow_refusals(
-    status_code: int, message: str, error_type: type[Exception]
-) -> None:
-    """The scope, the key creator's role and the workflow's existence each
-    refuse with the server's message."""
-    client = make_client([FakeResponse(status_code, {"error": message})])
-
-    with pytest.raises(error_type) as exc:
-        client.workflows.delete("665f")
-
-    assert str(exc.value) == message
+def test_refuses_to_send_the_key_unencrypted_off_this_machine(remote: str) -> None:
+    with pytest.raises(ConfigurationError, match="must use https://"):
+        Lodol(api_key="k", base_url=remote)
 
 
-def test_delete_workflow_is_not_retried() -> None:
-    session = FakeSession([requests.ConnectionError("down")])
-    client = Lodol(
-        api_key="sk_live_test",
-        session=session,  # type: ignore[arg-type]
-        max_retries=2,
+@pytest.mark.parametrize("bad", ["localhost:3901", "api-prod.lodol.com", "ftp://x"])
+def test_refuses_an_address_that_isnt_a_url(bad: str) -> None:
+    with pytest.raises(ConfigurationError, match="full address"):
+        Lodol(api_key="k", base_url=bad)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, "30", True])
+def test_refuses_a_bad_timeout(timeout: object) -> None:
+    with pytest.raises(ConfigurationError, match="timeout"):
+        Lodol(api_key="k", timeout=timeout)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("max_retries", [-1, 1.5, None])
+def test_refuses_bad_max_retries(max_retries: object) -> None:
+    with pytest.raises(ConfigurationError, match="max_retries"):
+        Lodol(api_key="k", max_retries=max_retries)  # type: ignore[arg-type]
+
+
+def test_every_request_identifies_itself(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"workflows": []}))
+
+    client.workflows.list()
+
+    headers = api.last.headers
+    assert headers["Authorization"] == "Bearer sk_live_test"
+    assert headers["Accept"] == "application/json"
+    assert headers["User-Agent"] == USER_AGENT
+    assert USER_AGENT.startswith(f"lodol-python/{lodol.__version__} python/3.")
+    # Nothing is sent, so nothing is described.
+    assert "Content-Type" not in headers
+    assert "Idempotency-Key" not in headers
+
+
+def test_closing_closes_the_connections_it_opened() -> None:
+    client = Lodol(api_key="k")
+
+    with client:
+        pass
+
+    assert client._http_client.is_closed
+
+
+def test_leaves_a_given_http_client_open_for_its_owner() -> None:
+    http = httpx2.Client()
+
+    with Lodol(api_key="k", http_client=http):
+        pass
+
+    assert not http.is_closed
+    http.close()
+
+
+def test_request_reaches_any_endpoint(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"approvals": [], "next_before": None}))
+
+    body = client.request(
+        "get", "/approvals", params={"status": "all", "limit": 5, "skip": None}
     )
 
-    with pytest.raises(APIConnectionError):
-        client.workflows.delete("665f")
-
-    assert len(session.requests) == 1
+    assert body == {"approvals": [], "next_before": None}
+    assert api.sent() == ("GET", "/approvals", {"status": "all", "limit": "5"})
 
 
-def test_delete_workflow_rejects_non_object_response() -> None:
-    client = make_client([FakeResponse(200, ["not-an-object"])])
+def test_request_spells_booleans_the_way_the_api_reads_them(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(respond(200, {"execution_id": "e1", "status": "success"}))
 
-    with pytest.raises(APIResponseValidationError) as exc:
-        client.workflows.delete("665f")
+    client.request("GET", "/executions/e1", params={"include_step_results": True})
 
-    assert "DELETE /workflows/{workflow_id} returned list, expected object" in str(exc.value)
+    assert api.sent()[2] == {"include_step_results": "true"}
+
+
+def test_request_sends_json_and_an_idempotency_key(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, {"execution_id": "e1"}))
+
+    client.request(
+        "POST", "/workflows/w1/run-async", json={"inputs": {}}, idempotency_key="k1"
+    )
+
+    assert api.body() == {"inputs": {}}
+    assert api.last.headers["Content-Type"] == "application/json"
+    assert api.last.headers["Idempotency-Key"] == "k1"
+
+
+def test_request_returns_none_for_an_empty_answer(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(204))
+
+    assert client.request("DELETE", "/somewhere") is None
