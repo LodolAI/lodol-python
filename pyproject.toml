@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,7 +11,7 @@ requires-python = ">=3.9"
 authors = [
     {name = "Lodol"}
 ]
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 dependencies = [
     "requests>=2.25.0",
 ]
@@ -20,6 +20,12 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Operating System :: OS Independent",
 ]
+
+[project.urls]
+Homepage = "https://lodol.ai"
+Documentation = "https://docs.lodol.com"
+Source = "https://github.com/LodolAI/lodol-python"
+Issues = "https://github.com/LodolAI/lodol-python/issues"
 
 [project.optional-dependencies]
 # Test runner + coverage. Kept version-lenient so it installs across the full

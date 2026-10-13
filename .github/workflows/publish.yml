@@ -1,0 +1,79 @@
+name: Publish
+
+# Publishing a GitHub Release uploads that version to PyPI. Uses PyPI Trusted
+# Publishing, so there is no API token to store: PyPI trusts this workflow, in
+# this repository, running in the ``pypi`` environment, and nothing else.
+on:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Check release tag matches package version
+        # A version number can never be reused on PyPI, so stop a ``v0.2.0``
+        # release from shipping code whose version.py still says 0.1.0.
+        run: |
+          version=$(python -c "import re, pathlib; print(re.search(r'__version__ = \"(.+)\"', pathlib.Path('src/lodol/version.py').read_text()).group(1))")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match version $version in src/lodol/version.py. Tag the release v$version, or update version.py first."
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build twine
+          python -m build
+
+      - name: Validate package metadata
+        # Same strict check PyPI applies on upload, so a bad README or metadata
+        # fails here instead of halfway through publishing.
+        run: twine check --strict dist/*
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    # Must match the environment registered as the trusted publisher on PyPI.
+    # Add required reviewers to it in GitHub to approve each release by hand.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/lodol/
+
+    permissions:
+      # Lets GitHub prove to PyPI that this workflow is the one publishing.
+      id-token: write
+
+    steps:
+      - name: Download distribution
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
