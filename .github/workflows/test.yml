@@ -12,7 +12,7 @@ permissions:
 env:
   # Minimum acceptable coverage. Bump this as coverage improves; never lower it
   # without explicit approval.
-  COVERAGE_MIN: "70"
+  COVERAGE_MIN: "95"
 
 jobs:
   test:
@@ -24,8 +24,8 @@ jobs:
       # easy to spot instead of cancelling the rest of the matrix.
       fail-fast: false
       matrix:
-        # The SDK declares requires-python >= 3.9, so exercise the whole range.
-        python-version: [ "3.9", "3.10", "3.11", "3.12", "3.13" ]
+        # The SDK declares requires-python >= 3.10, so exercise the whole range.
+        python-version: [ "3.10", "3.11", "3.12", "3.13", "3.14", "3.15" ]
 
     steps:
       - name: Checkout code
@@ -37,6 +37,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          # The newest Python can be a release candidate on some runners.
+          allow-prereleases: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -58,7 +60,7 @@ jobs:
             --cov-fail-under="${COVERAGE_MIN}"
 
       - name: Upload coverage report
-        # One artifact is enough; publish it from the newest interpreter only.
+        # One artifact is enough; publish it from one interpreter only.
         if: always() && matrix.python-version == '3.13'
         uses: actions/upload-artifact@v7
         with:
@@ -66,3 +68,34 @@ jobs:
           path: coverage.xml
           if-no-files-found: warn
           retention-days: 14
+
+  lowest-dependencies:
+    # pyproject.toml promises the SDK works with the oldest httpx2 and anyio
+    # it names. Check that promise, on the oldest Python it supports.
+    name: Test (lowest dependency versions)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install the lowest versions allowed
+        run: |
+          uv pip install --system --resolution lowest-direct -e .
+          uv pip install --system pytest trio
+
+      - name: Run tests
+        run: pytest

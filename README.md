@@ -1,174 +1,230 @@
-# lodol-python
+# Lodol for Python
 
-Python SDK for the Lodol Developer API.
-
-The SDK wraps the Developer API so users can run workflows and inspect executions from Python without hand-writing `curl` or `requests` calls.
-
-## Install
+Run your Lodol workflows from Python: start runs, wait for them, follow their history, and answer the approvals they ask for.
 
 ```bash
 pip install lodol
 ```
 
-For local development from this repo:
+Python 3.10 or later.
 
-```bash
-pip install -e .[dev]
-```
+## Quickstart
 
-## Configure
-
-`Lodol()` reads `LODOL_API_KEY` from the environment by default.
+Create an API key in Lodol under **Settings > API Keys**, then:
 
 ```bash
 export LODOL_API_KEY="sk_live_..."
 ```
 
-You can also pass the API key explicitly:
-
 ```python
 from lodol import Lodol
 
-client = Lodol(api_key="sk_live_...")
+lodol = Lodol()
+
+run = lodol.workflows.run("665f...", inputs={"client": "Acme"}, wait=True)
+print(run.status)  # "success"
 ```
+
+That starts the workflow, waits for it to finish, and gives you the finished run. If the run fails or is stopped, it raises `RunFailedError` instead, so a script never carries on as if it worked.
+
+Make one `Lodol()` and reuse it. It keeps connections open between calls and can be shared between threads.
 
 ## Run a workflow
 
 ```python
-from lodol import Lodol
+workflow = lodol.workflows.get("665f...")
 
-client = Lodol()
-execution = client.workflows.run("665f...")
+for workflow_input in workflow.inputs:
+    print(workflow_input.name, workflow_input.type, workflow_input.required)
 
-print(execution.id)
-print(execution.status)
+run = lodol.workflows.run(workflow, inputs={"client": "Acme", "month": "2026-05"})
+print(run.id, run.status)  # "683b...", "queued"
 ```
 
-This sends:
+Without `wait=True`, `run` returns as soon as the run is queued. A workflow's `id` stays the same when it's edited, so it's safe to store.
 
-```http
-POST /api/v1/workflows/{workflow_id}/run-async
-Authorization: Bearer sk_live_...
-Idempotency-Key: lodol-workflow-run-...
-```
+**Inputs** are given by name and converted to each input's type, so `"21"` reaches a number input as `21`, and an optional input you leave out takes its default. Dates, times and `Decimal`s are sent as text Lodol reads (`date(2026, 5, 1)` becomes `"2026-05-01"`). An input the workflow doesn't declare, a missing required one, or a value of the wrong type raises `BadRequestError` naming the input, and nothing runs.
 
-The SDK automatically adds an idempotency key for workflow runs and execution stops, so retries do not accidentally duplicate side effects.
-
-A workflow's `id` stays the same when the workflow is edited, so it is safe to store and run later.
-
-## Pass inputs
-
-If a workflow declares inputs, give their values by name, so one workflow can run for a particular client, month, or record:
+**Running something exactly once.** A retried request never starts a second run. To make sure a run happens once even across separate attempts, such as a nightly job that may be restarted, pass the same `idempotency_key` each time:
 
 ```python
-execution = client.workflows.run(
+lodol.workflows.run(
     "665f...",
     inputs={"client": "Acme", "month": "2026-05"},
+    idempotency_key="monthly-report:acme:2026-05",
 )
 ```
 
-This sends the values as the request body:
+Within 24 hours, the same key with the same inputs returns the run it already started, even if the first attempt is still under way. The same key with different inputs raises `UnprocessableEntityError`. Any text up to 256 characters works as a key.
 
-```http
-POST /api/v1/workflows/{workflow_id}/run-async
-Content-Type: application/json
+**Workflows that start themselves.** A workflow that starts from its own trigger or schedule doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own. With `wait=True`, `run` returns at once, with a warning, since there's no end to wait for.
 
-{"inputs": {"client": "Acme", "month": "2026-05"}}
-```
-
-`workflow.inputs` lists the inputs a workflow declares, as `WorkflowInput` objects with `name`, `type`, `required`, `default`, and `description`. Values are converted to the declared type, so `"21"` reaches a number input as `21`, and optional inputs you leave out take their default. An input the workflow doesn't declare, a missing required input, or a value of the wrong type raises `BadRequestError` naming the input, and nothing runs. A workflow that starts from its own trigger or schedule takes no inputs.
-
-If you pass your own `idempotency_key`, use a new one for different inputs: reusing a key with a different request raises `UnprocessableEntityError`.
-
-## Wait for completion
+## Wait for a run
 
 ```python
-execution = client.workflows.run("665f...", wait=True, timeout=120)
+from lodol import RunFailedError, WaitTimeoutError
 
-if execution.status == "success":
-    print("Done")
+try:
+    run = lodol.runs.wait("683b...", timeout=600)
+except RunFailedError as error:
+    print("It didn't work:", error.run.error)
+except WaitTimeoutError:
+    print("Still going after 10 minutes. It carries on in Lodol.")
 else:
-    print(execution.status, execution.error)
+    for step in run.steps or []:
+        print(step.index, step.status, step.result)
 ```
 
-Or wait on an existing execution:
+`wait` checks on the run often at first, then less often, at most every 10 seconds, and never faster than your plan's API allowance (the Free plan's 5 requests a minute means a check every 12 seconds). Rate limits and brief outages don't end a wait: it slows down and keeps going, and gives up only when `timeout` passes, or after five minutes without a successful check.
+
+The finished run comes with its step results (`run.steps`). `RunFailedError` carries the run too, as `error.run`, so you can see which step failed. If the run has finished but its step results can't be fetched in time, you get the run without them rather than an error. Without a `timeout`, `wait` waits as long as the run takes, including while it waits for someone to answer an approval.
+
+## Follow runs
 
 ```python
-execution = client.executions.wait("683b...", timeout=120)
+for run in lodol.runs.list(workflow="665f...", limit=20):
+    print(run.created_at, run.status)
 ```
 
-`wait()` polls `GET /api/v1/executions/{execution_id}` until the execution reaches a terminal status: `success`, `failed`, or `stopped`.
+Runs come newest first. Loop over the result and pages are fetched as you go, so stopping early costs nothing extra. Leave out `limit` to go through all of them, and `workflow` to see every workflow's runs. Listed runs leave out `error` and `steps`; `runs.get` has them.
+
+```python
+run = lodol.runs.get("683b...", include_steps=True)
+lodol.runs.stop(run)
+```
+
+`run.workflow_id` is the workflow's `id`. `run.version_id` is the version of the workflow that ran, which changes as the workflow is edited. Times are timezone-aware `datetime`s.
+
+Stopping a run doesn't undo the steps it already finished. If the run had already finished, `stop` returns it as it finished rather than raising.
+
+## Answer approvals
+
+A workflow's **Request approval** step pauses its run until someone answers. Your own system can answer instead of a person in Lodol:
+
+```python
+for approval in lodol.approvals.list():  # pending ones, newest first
+    print(approval.title, approval.details, approval.workflow_name)
+
+    if approval.kind == "reply":
+        lodol.approvals.reply(approval, "The PO number is 4471")
+    else:
+        lodol.approvals.approve(approval, comment="Matches the purchase order")
+        # or lodol.approvals.reject(approval, comment="Wrong amount")
+```
+
+The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. If someone else answered first, or the request expired, you get `ConflictError`. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how.
 
 ## Workflows
 
 ```python
-workflows = client.workflows.list()
-workflow = client.workflows.retrieve("665f...")
+workflows = lodol.workflows.list()
+drafts = [workflow for workflow in workflows if workflow.is_draft]
 
-for workflow in workflows:
-    print(workflow.id, workflow.name)
-    for workflow_input in workflow.inputs:
-        print(" ", workflow_input.name, workflow_input.type, workflow_input.required)
-
-execution = workflow.run(wait=True)
+deleted = lodol.workflows.delete("665f...")
 ```
 
-## Delete a workflow
+Deleting removes the workflow and every version of it, as deleting it in Lodol does: runs in progress stop, and its trigger or schedule stops listening. It can't be undone. Its past runs stay readable. It needs a key with the **Delete workflows** scope, which isn't ticked by default, made by a member who's allowed to delete workflows.
+
+A delete is never sent twice. If it times out, check with `lodol.workflows.get(...)` before trying again, since it may have happened.
+
+## Errors
+
+When Lodol or the network says no, the SDK raises a `LodolError`. Errors from the API carry Lodol's own explanation as their message, and `code` when it sends one. A call that can't be made as written (inputs that aren't a dict, a timeout that isn't a number) raises `TypeError` or `ValueError` before anything is sent.
+
+| Exception | When | What to do |
+| --- | --- | --- |
+| `RunFailedError` | A run you waited for failed or was stopped | Look at `error.run` |
+| `WaitTimeoutError` | A run wasn't finished within `timeout` | Wait again, or stop it. The run carries on |
+| `BadRequestError` | The request was refused, such as inputs that don't fit | Read the message: it names the problem |
+| `AuthenticationError` | The key is missing, wrong, revoked or expired | Check `LODOL_API_KEY` |
+| `PermissionDeniedError` | The key's scopes, or its creator's role, don't allow this | Give the key the scope, or use another key |
+| `NotFoundError` | No such workflow, run or approval in this workspace | Check the id |
+| `ConflictError` | An approval was already answered; or Lodol was still working on an earlier attempt of a request after five minutes | For an approval, nothing. Otherwise check before trying again: the message has the key to retry with |
+| `ConcurrencyLimitError` | Your plan's runs-at-once limit is reached | Wait for a run to finish, then start another |
+| `RunLimitError` | This month's runs are used up | Runs come back at `error.resets_at` |
+| `RateLimitError` | Too many requests, for longer than the SDK waits on its own | Wait `error.retry_after` seconds |
+| `APIConnectionError`, `APITimeoutError` | Lodol couldn't be reached, didn't answer, or had a certificate that couldn't be verified | Try again later; for a certificate, see the message |
+
+## What happens automatically
+
+- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads; runs, stops and approval answers, which carry an idempotency key; and anything a rate limit refused, since Lodol refuses before doing anything. A delete that fails otherwise, and limits that last longer, are reported at once.
+- **Idempotency keys.** Every run, stop and approval answer gets one, so a retry can never start a second run or answer twice. If a retry finds Lodol still working on the first attempt, it waits for that, up to five minutes, rather than starting again.
+- **Timeouts.** Each request may take 30 seconds (`timeout`). Waiting for a run has its own `timeout`.
+- **Security.** Your key is only sent over HTTPS, except to Lodol Local on your own machine, which is reached directly, never through a proxy. It never appears in logs or reprs.
+
+## Async
 
 ```python
-deleted = client.workflows.delete("665f...")
-print(deleted.id, deleted.name)
+from lodol import AsyncLodol
+
+async with AsyncLodol() as lodol:
+    run = await lodol.workflows.run("665f...", inputs={"client": "Acme"}, wait=True)
+
+    async for approval in lodol.approvals.list():
+        print(approval.title)
 ```
 
-Or from a workflow you already have:
+`AsyncLodol` does everything `Lodol` does, with every call awaited and lists looped over with `async for`. It works with asyncio and trio.
 
-```python
-workflow.delete()
-```
+## Lodol Local
 
-This sends `DELETE /api/v1/workflows/{workflow_id}` and removes the workflow and every version of it, as deleting it from the Workflows page does: any run in progress is stopped, and its trigger or schedule stops listening. It cannot be undone. Its past runs stay readable under `client.executions`.
-
-The key needs the `workflows:delete` scope, which is not granted by default: tick **Delete workflows** when creating the key. The member who created the key must also be allowed to delete workflows in the workspace; otherwise the call raises `PermissionDeniedError`. A workflow that doesn't exist, or is already gone, raises `NotFoundError`.
-
-Deletes are not retried. If the request times out, check with `client.workflows.retrieve(...)` before calling again: the delete may have happened.
-
-## Executions
-
-```python
-executions = client.executions.list(limit=20)
-filtered = client.executions.list(workflow_id="665f...", limit=10)
-
-execution = client.executions.retrieve("683b...", include_step_results=True)
-latest = execution.refresh()
-stopped = execution.stop()
-```
-
-`execution.workflow_id` is the workflow's `id`, and `execution.version_id` is the version of the workflow that ran, which changes as the workflow is edited. Filtering by `workflow_id` returns the runs of every version.
-
-## Retries and errors
-
-The client retries transient failures by default (`408`, `409`, `429`, and `5xx`, plus retryable transport errors). POST retries are only used when an idempotency key is present.
-
-```python
-from lodol import Lodol, RateLimitError, NotFoundError
-
-client = Lodol(max_retries=3)
-
-try:
-    client.workflows.retrieve("bad-id")
-except NotFoundError:
-    print("Workflow not found")
-except RateLimitError as exc:
-    print("Retry after", exc.retry_after)
-```
-
-## Low-level requests
-
-For new Developer API endpoints before first-class SDK methods exist:
+Point the client at your own installation:
 
 ```python
 from lodol import Lodol
 
-client = Lodol()
-body = client.request("GET", "/workflows")
+lodol = Lodol(base_url="http://localhost:3901")
 ```
+
+or set `LODOL_BASE_URL`. Plain `http://` is allowed only for this machine (`localhost`, or `host.docker.internal` from a container); anything else must be `https://`.
+
+## Settings
+
+| Argument | Environment variable | Default |
+| --- | --- | --- |
+| `api_key` | `LODOL_API_KEY` | (required) |
+| `base_url` | `LODOL_BASE_URL` | `https://api-prod.lodol.com/api/v1` |
+| `timeout` | | `30` seconds per request |
+| `max_retries` | | `2` |
+| `http_client` | | Your own `httpx2.Client` (or `httpx2.AsyncClient`) for proxies, custom certificates or tests |
+
+Proxies and custom certificates are also picked up from the usual environment variables (`HTTPS_PROXY`, `SSL_CERT_FILE`).
+
+## Logging
+
+Set `LODOL_LOG=info` to see retries and what runs you're waiting for are doing, or `LODOL_LOG=debug` to see every request too. Or configure the `lodol` logger with Python's `logging`. Requests are logged by method, path and status only, never with your key or the inputs you send.
+
+## Testing your code
+
+Give the client an `httpx2` mock transport and answer as Lodol would:
+
+```python
+import httpx2
+from lodol import Lodol
+
+
+def fake_lodol(request: httpx2.Request) -> httpx2.Response:
+    if request.url.path.endswith("/run-async"):
+        return httpx2.Response(202, json={"execution_id": "683b", "status": "queued"})
+    return httpx2.Response(404, json={"error": "Workflow not found"})
+
+
+lodol = Lodol(
+    api_key="sk_live_test",
+    http_client=httpx2.Client(transport=httpx2.MockTransport(fake_lodol)),
+)
+```
+
+Models are plain data, so you can also build them directly: `Run(id="683b", status="success")`. They can be compared, hashed and pickled, and so can the SDK's errors.
+
+## Endpoints the SDK doesn't cover yet
+
+```python
+body = lodol.request("GET", "/approvals", params={"status": "all"})
+```
+
+`request` reaches any Developer API endpoint and returns its JSON. Errors raise as they do everywhere else. A write is retried only when you give it an `idempotency_key`.
+
+## Upgrading from 0.1
+
+0.2 renames executions to runs, to match Lodol, and changes a few behaviors. See [CHANGELOG.md](CHANGELOG.md) for the full list.

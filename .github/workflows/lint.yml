@@ -37,10 +37,12 @@ jobs:
         # far faster than pip because uv installs from a hard-linked wheel cache.
         # Editable (-e) so pylint can import the package and resolve intra-package
         # imports while linting ``src``.
-        run: uv pip install --system -e '.[lint]'
+        run: uv pip install --system -e '.[lint,test]'
 
       - name: Run mypy
-        run: mypy src --config-file mypy.ini
+        # Tests too: they call the SDK the way users do, so they also check
+        # that its public types work in strictly typed code.
+        run: mypy src tests --config-file mypy.ini
 
       - name: Run pylint
         # ``-j 0`` fans pylint out across all available cores. The repo's
@@ -52,4 +54,12 @@ jobs:
         # ``--fast`` skips black's AST-equivalence re-parse. Under ``--check``
         # black still computes the formatting to compare, so the pass/fail result
         # is unchanged; only the redundant safety re-parse is dropped.
-        run: black --check --fast src
+        run: black --check --fast src tests
+
+      - name: Build and check the package
+        # What a release would upload, checked as PyPI checks it, so a broken
+        # README or metadata fails here rather than at release time.
+        run: |
+          uv pip install --system build twine
+          python -m build
+          twine check --strict dist/*
