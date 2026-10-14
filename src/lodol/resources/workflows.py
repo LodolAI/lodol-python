@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Any, Mapping
 
 from lodol._transport import (
@@ -17,7 +16,7 @@ from lodol._transport import (
 )
 from lodol.models import DeletedWorkflow, Run, Workflow
 from lodol.resources._common import object_id
-from lodol.resources.runs import check_wait_timeout
+from lodol.resources.runs import check_wait_timeout, warn_listening
 
 if TYPE_CHECKING:  # pragma: no cover - only for type hints
     from lodol.client import AsyncLodol, Lodol
@@ -238,12 +237,7 @@ def _run_request(
 def _listening(started: Run) -> bool:
     """Whether a run just started is a workflow's trigger listening, which
     never finishes; warned about, since waiting for it would never end."""
-    if not started.raw.get("is_trigger_workflow"):
+    if not started.is_trigger_listener:
         return False
-    warnings.warn(
-        "This workflow starts from its own trigger or schedule, so there's no end "
-        f"to wait for: it is now listening (run {started.id}), and each event it "
-        "catches starts a run of its own.",
-        stacklevel=3,
-    )
+    warn_listening(started, stacklevel=3)
     return True

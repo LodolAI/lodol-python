@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import TYPE_CHECKING
 
 from lodol import _transport, constants
@@ -49,7 +50,6 @@ _UNFINISHED = {
     "paused": "paused",
     "waiting": "paused on a Wait step",
     "awaiting_approval": "waiting for someone to answer an approval request",
-    "waiting_for_trigger": "listening for its trigger",
 }
 
 
@@ -66,7 +66,7 @@ class Runs:
         (every version of it).
 
         Loop over the result; pages are fetched as you go. ``limit`` stops
-        after that many runs. Listed runs leave out ``error`` and ``steps``:
+        after that many runs. Listed runs leave out ``outputs`` and ``steps``:
         ``runs.get`` has them.
         """
         workflow_id = _workflow_filter(workflow)
@@ -99,7 +99,9 @@ class Runs:
         stopped raises ``RunFailedError``, whose ``run`` says what happened.
         ``timeout`` is how many seconds to wait before raising
         ``WaitTimeoutError`` (the run itself carries on); by default it waits
-        as long as the run takes.
+        as long as the run takes. A workflow listening for its trigger
+        (``run.is_trigger_listener``) never finishes, so it is returned at
+        once, with a warning.
         """
         run_id = object_id(run, Run, "run")
         known = run if isinstance(run, Run) else None
@@ -157,8 +159,8 @@ class AsyncRuns:
         (every version of it).
 
         Loop over the result with ``async for``; pages are fetched as you go.
-        ``limit`` stops after that many runs. Listed runs leave out ``error``
-        and ``steps``: ``runs.get`` has them.
+        ``limit`` stops after that many runs. Listed runs leave out
+        ``outputs`` and ``steps``: ``runs.get`` has them.
         """
         workflow_id = _workflow_filter(workflow)
         limit = check_limit(limit)
@@ -194,7 +196,9 @@ class AsyncRuns:
         stopped raises ``RunFailedError``, whose ``run`` says what happened.
         ``timeout`` is how many seconds to wait before raising
         ``WaitTimeoutError`` (the run itself carries on); by default it waits
-        as long as the run takes.
+        as long as the run takes. A workflow listening for its trigger
+        (``run.is_trigger_listener``) never finishes, so it is returned at
+        once, with a warning.
         """
         run_id = object_id(run, Run, "run")
         known = run if isinstance(run, Run) else None
@@ -278,7 +282,8 @@ class _Waiting:
     def first_delay(self) -> float:
         """Seconds before the first check. A run known to be unfinished (one
         just started, say) isn't worth checking at once."""
-        if self.latest is not None and not self.latest.finished:
+        known = self.latest
+        if known is not None and not known.finished and not known.is_trigger_listener:
             return self._before_deadline(self._paced(self._next_interval()))
         return 0.0
 
@@ -300,6 +305,9 @@ class _Waiting:
             return None
         self.latest = run
         self._looked = True
+        if run.is_trigger_listener and not run.finished:
+            warn_listening(run, stacklevel=3)
+            return None
         if run.finished:
             if not self._include_steps:
                 return None
@@ -344,8 +352,11 @@ class _Waiting:
         return self._before_deadline(delay)
 
     def result(self) -> Run:
-        """The finished run, if it succeeded; otherwise why not, raised."""
+        """The finished run, if it succeeded; otherwise why not, raised. A
+        workflow listening for its trigger is returned as it is."""
         assert self.latest is not None
+        if self.latest.is_trigger_listener and not self.latest.finished:
+            return self.latest
         return _succeeded(self.latest)
 
     def without_steps(self) -> Run:
@@ -412,6 +423,19 @@ def _retry_after(error: LodolError) -> float | None:
     if isinstance(error, APIStatusError) and error.response is not None:
         return _transport.retry_after_seconds(error.response.headers)
     return None
+
+
+def warn_listening(run: Run, *, stacklevel: int) -> None:
+    """Warn that a run is a workflow listening for its trigger, which no wait
+    would ever see finish. ``stacklevel`` is what the caller would pass to
+    ``warnings.warn`` itself, to point at the user's own line."""
+    name = f"'{run.workflow_name}'" if run.workflow_name else "This workflow"
+    warnings.warn(
+        f"{name} starts from its own trigger or schedule, so there's no end to "
+        f"wait for: it is listening (run {run.id}), and each event it catches "
+        "starts a run of its own, which runs.list() lists.",
+        stacklevel=stacklevel + 1,
+    )
 
 
 def check_wait_timeout(timeout: float | None) -> float | None:
@@ -494,6 +518,5 @@ def _stop_request(run_id: str) -> APIRequest:
 
 
 def _already_finished(error: BadRequestError) -> bool:
-    # How the API refuses to stop a finished run: 400 "Execution already
-    # success" (or failed, or stopped).
-    return error.message.startswith("Execution already")
+    """Whether a stop was refused because the run had already finished."""
+    return error.code == "run_already_finished"

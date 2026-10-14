@@ -21,6 +21,7 @@ from lodol import (
     WaitTimeoutError,
     Workflow,
     WorkflowInput,
+    WorkflowOutput,
 )
 from lodol.models import parse_datetime
 
@@ -195,19 +196,25 @@ def test_errors_cross_process_boundaries() -> None:
 
 def test_models_can_be_hashed_whatever_they_hold() -> None:
     workflow = Workflow.from_api(
-        {"id": "665f", "name": "x", "inputs": [{"name": "tags", "default": ["a"]}]}
+        {
+            "id": "665f",
+            "name": "x",
+            "inputs": [{"name": "tags", "default": ["a"]}],
+            "outputs": [{"name": "total", "type": "number"}],
+        }
     )
     run = Run.from_api(
         {
             "execution_id": "r",
             "status": "success",
             "steps": [{"index": 0, "result": {"a": 1}}],
+            "outputs": {"rows": [{"a": 1}]},
         }
     )
 
     assert {workflow, workflow} == {workflow}
     assert {run, run} == {run}
-    # What a field holds (here, step results) stays out of the hash.
+    # What a field holds (here, step results and outputs) stays out of the hash.
     assert hash(run) == hash(Run.from_api({"execution_id": "r", "status": "success"}))
 
 
@@ -218,9 +225,55 @@ def test_statuses_include_every_one_a_run_reports() -> None:
         "waiting",
         "awaiting_approval",
         "paused",
-        "waiting_for_trigger",
         "stopping",
         "success",
         "failed",
         "stopped",
     }
+
+
+def test_a_run_carries_what_it_handed_back() -> None:
+    run = Run.from_api(
+        {
+            "execution_id": "683b",
+            "status": "success",
+            "outputs": {"total": 1250, "summary.text": "A good month", "owner": None},
+        }
+    )
+
+    assert run.outputs == {"total": 1250, "summary.text": "A good month", "owner": None}
+    assert not run.is_trigger_listener
+
+
+def test_a_run_without_outputs_has_none() -> None:
+    assert Run.from_api({"execution_id": "683b", "status": "running"}).outputs == {}
+    assert Run.from_api({"execution_id": "683b", "outputs": None}).outputs == {}
+
+
+def test_a_listener_is_marked() -> None:
+    run = Run.from_api(
+        {"execution_id": "683b", "status": "running", "is_trigger_listener": True}
+    )
+
+    assert run.is_trigger_listener
+    assert not run.finished
+
+
+def test_a_workflow_says_what_it_hands_back() -> None:
+    workflow = Workflow.from_api(
+        {
+            "id": "665f",
+            "name": "Monthly report",
+            "outputs": [
+                {"name": "total", "type": "number", "description": "In dollars"},
+                {"name": "summary"},
+                "not an output",
+            ],
+        }
+    )
+
+    assert workflow.outputs == [
+        WorkflowOutput(name="total", type="number", description="In dollars"),
+        WorkflowOutput(name="summary", type="text"),
+    ]
+    assert Workflow.from_api({"id": "665f", "name": "x"}).outputs == []

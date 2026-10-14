@@ -81,8 +81,10 @@ class APIStatusError(APIError):
     """The API answered with an error status.
 
     ``message`` is the server's own explanation, ``code`` its stable
-    machine-readable error code when it sends one (such as
-    ``"monthly_run_limit"``), and ``body`` the parsed response body.
+    machine-readable error code (such as ``"monthly_run_limit"``; decide what
+    to do from this, never from the wording), and ``body`` the parsed
+    response body. ``request_id`` names the request to Lodol's support; it is
+    also in the error's text, so it comes along when the error is pasted.
     """
 
     def __init__(
@@ -99,6 +101,14 @@ class APIStatusError(APIError):
         self.code = code
         self.body = body
         self.response = response
+        self.request_id: str | None = (
+            response.headers.get("X-Request-Id") if response is not None else None
+        )
+
+    def __str__(self) -> str:
+        if self.request_id:
+            return f"{self.message} (request ID: {self.request_id})"
+        return self.message
 
 
 class APIResponseValidationError(APIStatusError):

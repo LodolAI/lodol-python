@@ -22,10 +22,10 @@ from lodol import Lodol
 lodol = Lodol()
 
 run = lodol.workflows.run("665f...", inputs={"client": "Acme"}, wait=True)
-print(run.status)  # "success"
+print(run.outputs)  # {"total": 1250}
 ```
 
-That starts the workflow, waits for it to finish, and gives you the finished run. If the run fails or is stopped, it raises `RunFailedError` instead, so a script never carries on as if it worked.
+That starts the workflow, waits for it to finish, and gives you what it handed back: `run.outputs` holds each output the workflow declares, by name. If the run fails or is stopped, it raises `RunFailedError` instead, so a script never carries on as if it worked.
 
 Make one `Lodol()` and reuse it. It keeps connections open between calls and can be shared between threads.
 
@@ -36,6 +36,8 @@ workflow = lodol.workflows.get("665f...")
 
 for workflow_input in workflow.inputs:
     print(workflow_input.name, workflow_input.type, workflow_input.required)
+for output in workflow.outputs:
+    print(output.name, output.type)  # what run.outputs will hold
 
 run = lodol.workflows.run(workflow, inputs={"client": "Acme", "month": "2026-05"})
 print(run.id, run.status)  # "683b...", "queued"
@@ -57,7 +59,7 @@ lodol.workflows.run(
 
 Within 24 hours, the same key with the same inputs returns the run it already started, even if the first attempt is still under way. The same key with different inputs raises `UnprocessableEntityError`. Any text up to 256 characters works as a key.
 
-**Workflows that start themselves.** A workflow that starts from its own trigger or schedule doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own. With `wait=True`, `run` returns at once, with a warning, since there's no end to wait for.
+**Workflows that start themselves.** A workflow that starts from its own trigger or schedule doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own, which `runs.list` lists. The listening run has `run.is_trigger_listener` set, and its status reads `"running"` for as long as it listens. Waiting on it, with `wait=True` or `runs.wait`, returns it at once, with a warning, since there's no end to wait for.
 
 ## Wait for a run
 
@@ -71,13 +73,14 @@ except RunFailedError as error:
 except WaitTimeoutError:
     print("Still going after 10 minutes. It carries on in Lodol.")
 else:
+    print(run.outputs)
     for step in run.steps or []:
         print(step.index, step.status, step.result)
 ```
 
 `wait` checks on the run often at first, then less often, at most every 10 seconds, and never faster than your plan's API allowance (the Free plan's 5 requests a minute means a check every 12 seconds). Rate limits and brief outages don't end a wait: it slows down and keeps going, and gives up only when `timeout` passes, or after five minutes without a successful check.
 
-The finished run comes with its step results (`run.steps`). `RunFailedError` carries the run too, as `error.run`, so you can see which step failed. If the run has finished but its step results can't be fetched in time, you get the run without them rather than an error. Without a `timeout`, `wait` waits as long as the run takes, including while it waits for someone to answer an approval.
+The finished run comes with its outputs (`run.outputs`) and its step results (`run.steps`). An output the run never set is `None`. `RunFailedError` carries the run too, as `error.run`, so you can see which step failed. If the run has finished but its step results can't be fetched in time, you get the run without them rather than an error. Without a `timeout`, `wait` waits as long as the run takes, including while it waits for someone to answer an approval.
 
 ## Follow runs
 
@@ -86,7 +89,7 @@ for run in lodol.runs.list(workflow="665f...", limit=20):
     print(run.created_at, run.status)
 ```
 
-Runs come newest first. Loop over the result and pages are fetched as you go, so stopping early costs nothing extra. Leave out `limit` to go through all of them, and `workflow` to see every workflow's runs. Listed runs leave out `error` and `steps`; `runs.get` has them.
+Runs come newest first. Loop over the result and pages are fetched as you go, so stopping early costs nothing extra. Leave out `limit` to go through all of them, and `workflow` to see every workflow's runs. Listed runs leave out `outputs` and `steps`; `runs.get` has them. A failed run says why in `run.error`, listed or not.
 
 ```python
 run = lodol.runs.get("683b...", include_steps=True)
@@ -129,7 +132,7 @@ A delete is never sent twice. If it times out, check with `lodol.workflows.get(.
 
 ## Errors
 
-When Lodol or the network says no, the SDK raises a `LodolError`. Errors from the API carry Lodol's own explanation as their message, and `code` when it sends one. A call that can't be made as written (inputs that aren't a dict, a timeout that isn't a number) raises `TypeError` or `ValueError` before anything is sent.
+When Lodol or the network says no, the SDK raises a `LodolError`. Errors from the API carry Lodol's own explanation as their message, and `code`, a stable name for what went wrong (such as `"run_already_finished"`): decide what to do from `code`, since the wording may change. `request_id` names the request; it's also in the error's text, so quote that when you contact Lodol's support. A call that can't be made as written (inputs that aren't a dict, a timeout that isn't a number) raises `TypeError` or `ValueError` before anything is sent.
 
 | Exception | When | What to do |
 | --- | --- | --- |

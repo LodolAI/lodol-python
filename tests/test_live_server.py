@@ -152,18 +152,44 @@ def test_a_slow_start_is_waited_for_not_repeated(server: Server) -> None:
 
 def test_a_workflow_that_starts_itself(server: Server) -> None:
     with Lodol(api_key=KEY, base_url=address(server)) as lodol:
-        with pytest.warns(UserWarning, match="it is now listening"):
+        with pytest.warns(UserWarning, match="it is listening"):
             run = lodol.workflows.run("9b2e", wait=True)
+        # Waiting on it later says the same, rather than waiting forever.
+        with pytest.warns(UserWarning, match="'New invoices' starts from its own"):
+            again = lodol.runs.wait(run.id)
 
-    assert run.status == "running"
+    assert run.status == "running" and run.is_trigger_listener
+    assert again.id == run.id and again.is_trigger_listener
 
 
-def test_listed_runs_carry_no_error_but_the_run_does(server: Server) -> None:
+def test_listed_runs_say_why_they_failed(server: Server) -> None:
     with Lodol(api_key=KEY, base_url=address(server)) as lodol:
         with pytest.raises(RunFailedError):
             lodol.workflows.run("7a1c", wait=True)
         (listed,) = lodol.runs.list()
-        fetched = lodol.runs.get(listed)
 
-    assert listed.error is None and listed.workflow_name == "Always fails"
-    assert fetched.error == "Sheet not found"
+    assert listed.error == "Sheet not found" and listed.workflow_name == "Always fails"
+
+
+def test_a_run_hands_back_its_outputs(server: Server) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        report = lodol.workflows.get("665f")
+        run = lodol.workflows.run(report, inputs={"client": "Acme"}, wait=True)
+        (listed,) = lodol.runs.list()
+
+    assert [o.name for o in report.outputs] == ["total"]
+    assert run.outputs == {"total": 1250}
+    # A list is a summary; the run itself has what it handed back.
+    assert listed.outputs == {}
+
+
+def test_an_error_names_its_request(server: Server) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        with pytest.raises(NotFoundError) as missing:
+            lodol.runs.get("nope")
+
+    error = missing.value
+    assert error.code == "not_found"
+    assert error.request_id is not None and error.request_id.startswith("req_")
+    assert str(error) == f"Execution not found (request ID: {error.request_id})"
+    assert error.message == "Execution not found"
