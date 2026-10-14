@@ -1,4 +1,4 @@
-"""Runs: follow your workflows' runs, wait for one to finish, stop one."""
+"""Runs: follow your workflows' runs, wait for one to finish, stop one, delete one."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from lodol.exceptions import (
     RunFailedError,
     WaitTimeoutError,
 )
-from lodol.models import Run, Workflow
+from lodol.models import DeletedRun, Run, Workflow
 from lodol.pagination import AsyncPaginator, Paginator, check_limit
 from lodol.resources._common import object_id
 
@@ -145,6 +145,19 @@ class Runs:
             return self.get(run_id)
         return _parse_run(response)
 
+    def delete(self, run: RunRef) -> DeletedRun:
+        """Delete a finished run, and the runs it started. This can't be undone.
+
+        The runs it started (its trigger's, or the workflows it called) go
+        with it, as when it is deleted in the app. A run still going is
+        refused with ``ConflictError`` (code ``"run_not_finished"``): stop it,
+        or wait for it, first. Needs a key with the ``executions:delete``
+        scope, made by a member allowed to delete runs. Never retried: if the
+        request times out, check with ``runs.get`` before trying again.
+        """
+        response = self._client._send(_delete_request(object_id(run, Run, "run")))
+        return _parse_deleted(response)
+
 
 class AsyncRuns:
     """The runs of the workspace's workflows."""
@@ -241,6 +254,19 @@ class AsyncRuns:
                 raise
             return await self.get(run_id)
         return _parse_run(response)
+
+    async def delete(self, run: RunRef) -> DeletedRun:
+        """Delete a finished run, and the runs it started. This can't be undone.
+
+        The runs it started (its trigger's, or the workflows it called) go
+        with it, as when it is deleted in the app. A run still going is
+        refused with ``ConflictError`` (code ``"run_not_finished"``): stop it,
+        or wait for it, first. Needs a key with the ``executions:delete``
+        scope, made by a member allowed to delete runs. Never retried: if the
+        request times out, check with ``runs.get`` before trying again.
+        """
+        response = await self._client._send(_delete_request(object_id(run, Run, "run")))
+        return _parse_deleted(response)
 
 
 class _Waiting:
@@ -514,6 +540,18 @@ def _stop_request(run_id: str) -> APIRequest:
         "POST",
         f"/executions/{path_id(run_id)}/stop",
         idempotency_key=new_idempotency_key("run-stop"),
+    )
+
+
+def _delete_request(run_id: str) -> APIRequest:
+    # No Idempotency-Key: the API doesn't take one here, so a delete is
+    # never sent twice (a second one would say the run is gone).
+    return APIRequest("DELETE", f"/executions/{path_id(run_id)}")
+
+
+def _parse_deleted(response: APIResponse) -> DeletedRun:
+    return DeletedRun.from_api(
+        expect_object(response, "DELETE /executions/{execution_id}")
     )
 
 

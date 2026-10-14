@@ -11,8 +11,11 @@ from lodol import (
     APIConnectionError,
     APIResponseValidationError,
     BadRequestError,
+    ConflictError,
+    DeletedRun,
     Lodol,
     NotFoundError,
+    PermissionDeniedError,
     Run,
     RunFailedError,
     RunStatus,
@@ -430,6 +433,69 @@ def test_stop_goes_by_the_code_not_the_wording(client: Lodol, api: FakeAPI) -> N
 
     with pytest.raises(BadRequestError):
         client.runs.stop("683b")
+
+
+# ── Deleting ─────────────────────────────────────────────────────────────
+
+
+def test_delete(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            200,
+            {"execution_id": "683b", "deleted": True, "started_runs_deleted": 2},
+        )
+    )
+
+    deleted = client.runs.delete(Run.from_api(run_json(status="success")))
+
+    assert deleted == DeletedRun(id="683b", started_runs_deleted=2)
+    assert api.sent() == ("DELETE", "/executions/683b", {})
+    # The API takes no key here: a second delete would just say it's gone.
+    assert "Idempotency-Key" not in api.last.headers
+    assert api.body() is None
+
+
+def test_deleting_a_run_still_going_raises(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            409,
+            {
+                "error": "Stop this run before deleting it.",
+                "error_code": "run_not_finished",
+            },
+        )
+    )
+
+    with pytest.raises(ConflictError) as exc:
+        client.runs.delete("683b")
+
+    assert exc.value.code == "run_not_finished"
+    assert str(exc.value).startswith("Stop this run before deleting it.")
+    # A refusal isn't retried: nothing about the run changes by asking again.
+    assert len(api.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "error_type"),
+    [
+        (
+            403,
+            "The member this API key acts for is not allowed to delete runs "
+            "in this workspace",
+            PermissionDeniedError,
+        ),
+        (404, "Execution not found", NotFoundError),
+    ],
+)
+def test_delete_refusals_carry_the_servers_words(
+    client: Lodol, api: FakeAPI, status: int, message: str, error_type: type[Exception]
+) -> None:
+    api.queue(respond(status, {"error": message}))
+
+    with pytest.raises(error_type) as exc:
+        client.runs.delete("683b")
+
+    assert str(exc.value) == message
 
 
 def test_waiting_on_a_listening_workflow_returns_it(
