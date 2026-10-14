@@ -179,6 +179,27 @@ class DeletedWorkflow:
 
 
 @dataclass(frozen=True)
+class DeletedRun:
+    """The run a delete removed, with the runs it started."""
+
+    id: str
+    #: The runs it started (its trigger's, or the workflows it called), which
+    #: were deleted with it.
+    started_runs_deleted: int = 0
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_api(cls, data: Mapping[str, Any]) -> DeletedRun:
+        raw = dict(data)
+        started = raw.get("started_runs_deleted")
+        return cls(
+            id=str(raw.get("execution_id") or ""),
+            started_runs_deleted=started if isinstance(started, int) else 0,
+            raw=raw,
+        )
+
+
+@dataclass(frozen=True)
 class Step:
     """What one step of a run did."""
 

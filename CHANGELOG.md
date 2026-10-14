@@ -9,6 +9,7 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - **Outputs.** `run.outputs` holds what a run handed back, by the names its workflow declares, and `workflow.outputs` lists them, so a script reads results instead of digging through step results.
 - **`AsyncLodol`**: everything `Lodol` does, for asyncio and trio.
 - **Approvals.** `lodol.approvals` lists the approval requests runs are waiting on, and answers them with `approve`, `reject` or `reply`.
+- **Deleting runs.** `runs.delete(run)` removes a finished run, and the runs it started, from the history. It needs a key with the new **Delete runs** scope.
 - **Lists you just loop over.** `runs.list()` and `approvals.list()` fetch pages as you go, newest first; `limit=` stops early.
 - **Lodol Local**, and any other address: `base_url=` or `LODOL_BASE_URL`.
 - **`RunFailedError`.** Waiting for a run that fails or is stopped raises, with the finished run attached, so a script never carries on as if it worked.

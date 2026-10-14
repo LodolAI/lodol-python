@@ -11,6 +11,7 @@ from lodol import (
     BadRequestError,
     ConcurrencyLimitError,
     ConflictError,
+    DeletedRun,
     DeletedWorkflow,
     InternalServerError,
     RunFailedError,
@@ -135,6 +136,15 @@ async def test_stop_returns_the_stopping_run(aclient: AsyncLodol, api: FakeAPI) 
     api.queue(respond(200, {"execution_id": "683b", "status": "stopping"}))
 
     assert (await aclient.runs.stop("683b")).status == "stopping"
+
+
+async def test_delete_run(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"execution_id": "683b", "deleted": True}))
+
+    deleted = await aclient.runs.delete("683b")
+
+    assert deleted == DeletedRun(id="683b")
+    assert api.sent() == ("DELETE", "/executions/683b", {})
 
 
 async def test_approvals(aclient: AsyncLodol, api: FakeAPI) -> None:

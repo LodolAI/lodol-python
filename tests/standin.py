@@ -193,6 +193,22 @@ class Handler(BaseHTTPRequestHandler):
             run = next((r for r in state.runs if r["execution_id"] == parts[1]), None)
             if run is None:
                 return self._error(404, "Execution not found")
+            if method == "DELETE" and len(parts) == 2:
+                if run["status"] not in ("success", "failed", "stopped"):
+                    return self._error(
+                        409,
+                        "Stop this run before deleting it.",
+                        error_code="run_not_finished",
+                    )
+                state.runs.remove(run)
+                return self._reply(
+                    200,
+                    {
+                        "execution_id": run["execution_id"],
+                        "deleted": True,
+                        "started_runs_deleted": 0,
+                    },
+                )
             if method == "POST" and parts[2:] == ["stop"]:
                 if run["status"] in ("success", "failed", "stopped"):
                     return self._error(

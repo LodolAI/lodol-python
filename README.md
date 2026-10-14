@@ -100,6 +100,14 @@ lodol.runs.stop(run)
 
 Stopping a run doesn't undo the steps it already finished. If the run had already finished, `stop` returns it as it finished rather than raising.
 
+```python
+run = lodol.runs.get("683b...")
+lodol.runs.stop(run)
+lodol.runs.delete(run)
+```
+
+Deleting a run removes it from the history, as deleting it in Lodol does, along with the runs it started: its trigger's, or the workflows it called. It can't be undone. A run still going has to be stopped first, or deleting it raises `ConflictError` with `code` `"run_not_finished"`. It needs a key with the **Delete runs** scope, which isn't ticked by default, made by a member who's allowed to delete runs. Like a workflow delete, it's never sent twice.
+
 ## Answer approvals
 
 A workflow's **Request approval** step pauses its run until someone answers. Your own system can answer instead of a person in Lodol:
