@@ -55,7 +55,7 @@ test = [
 # main lodol repository's CI so results are reproducible. The lint job runs on
 # Python 3.13 only, so these need not span the full test matrix.
 lint = [
-    "black==26.5.1",
+    "black==26.10.1",
     "mypy==2.4.0",
     "pylint==4.1.2",
 ]
