@@ -19,6 +19,7 @@ from lodol import (
     RetryOptions,
     RunFailedError,
     RunStatus,
+    StepStatus,
     UnprocessableEntityError,
 )
 from tests.standin import KEY, Server, address
@@ -36,6 +37,11 @@ def test_the_whole_journey(server: Server) -> None:
         assert run.succeeded
         assert run.steps is not None and run.steps[0].result == "Report for Acme"
         assert run.completed_at is not None
+        # A step that failed and carried on doesn't fail the run.
+        _, continued, skipped = run.steps
+        assert continued.status == StepStatus.CONTINUED and continued.attempts == 3
+        assert continued.error == "Slack didn't answer"
+        assert skipped.status == "skipped" and skipped.reason is not None
 
         with pytest.raises(RunFailedError, match="Sheet not found") as failed:
             lodol.workflows.run("7a1c", wait=True)

@@ -17,7 +17,7 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - **`RunFailedError`.** Waiting for a run that fails or is stopped raises, with the finished run attached, so a script never carries on as if it worked.
 - **`RunLimitError`**, a kind of `RateLimitError`, so "this month's runs are used up" (with `resets_at`) can be told apart from "slow down".
 - Every `APIStatusError` carries the server's machine-readable `code`, which the SDK itself now goes by, never the wording, and `request_id`, which is also in the error's text, so it comes along when an error is pasted into a support request.
-- `Workflow.is_draft`. Times are timezone-aware `datetime`s, step results are `Step` objects, and `RunStatus` and `ApprovalStatus` list the statuses.
+- `Workflow.is_draft`. Times are timezone-aware `datetime`s, step results are `Step` objects, which say why a step was skipped (`reason`) and how many tries it took (`attempts`), and `RunStatus`, `StepStatus` and `ApprovalStatus` list the statuses. A step that failed but was let carry on is `"continued"`, and never taken for the step that failed a run.
 - Dates, times, `Decimal`s and UUIDs in `inputs` are sent as text Lodol reads, and an input that can't be sent is named before anything is sent.
 - Any text works as an `idempotency_key`, and the same inputs are always sent byte for byte the same way, so a key always recognizes its request.
 - A workflow that starts from its own trigger, run with `wait=True` or waited on with `runs.wait`, returns at once with a warning: its run is it listening, and never ends. `run.is_trigger_listener` says so, since its status reads `"running"` the whole time. A failed run says why in `run.error` in `runs.list` too.

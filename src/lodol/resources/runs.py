@@ -29,7 +29,7 @@ from lodol.exceptions import (
     RunFailedError,
     WaitTimeoutError,
 )
-from lodol.models import DeletedRun, Run, RunStatus, Workflow
+from lodol.models import DeletedRun, Run, RunStatus, StepStatus, Workflow
 from lodol.pagination import AsyncPaginator, Paginator, check_limit
 from lodol.resources._common import object_id
 
@@ -607,8 +607,9 @@ def _succeeded(run: Run) -> Run:
         return run
     if run.status == "stopped":
         raise RunFailedError(f"Run {run.id} was stopped before it finished", run=run)
+    # The step that failed it: not one that failed and was let carry on.
     failed_step = next(
-        (step for step in run.steps or [] if step.status == "failed"), None
+        (step for step in run.steps or [] if step.status == StepStatus.FAILED), None
     )
     reason = run.error or (failed_step.error if failed_step else None)
     raise RunFailedError(

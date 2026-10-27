@@ -19,6 +19,8 @@ from lodol import (
     RetryOptions,
     Run,
     RunStatus,
+    Step,
+    StepStatus,
     WaitTimeoutError,
     Workflow,
     WorkflowInput,
@@ -60,6 +62,35 @@ def test_statuses_compare_as_text() -> None:
     assert run.status == RunStatus.AWAITING_APPROVAL
     assert f"{RunStatus.SUCCESS}" == "success"
     assert str(ApprovalStatus.EXPIRED) == "expired"
+    assert Step(index=0, status="continued").status == StepStatus.CONTINUED
+    assert str(StepStatus.SKIPPED) == "skipped"
+
+
+def test_a_step_says_how_it_went() -> None:
+    retried, continued, skipped = (
+        Step.from_api(step)
+        for step in [
+            {"index": 0, "status": "completed", "result": {"rows": 3}, "attempts": 2},
+            {
+                "index": 1,
+                "status": "continued",
+                "result": None,
+                "error": "Slack didn't answer",
+            },
+            {"index": 2, "status": "skipped", "reason": "This step is turned off."},
+        ]
+    )
+
+    assert retried == Step(index=0, status="completed", result={"rows": 3}, attempts=2)
+    assert continued.status == StepStatus.CONTINUED
+    assert continued.error == "Slack didn't answer" and continued.attempts is None
+    assert skipped == Step(index=2, status="skipped", reason="This step is turned off.")
+    assert skipped.result is None
+
+
+@pytest.mark.parametrize("attempts", [True, "2", 2.0, None])
+def test_attempts_that_arent_a_count_are_left_out(attempts: object) -> None:
+    assert Step.from_api({"index": 0, "attempts": attempts}).attempts is None
 
 
 @pytest.mark.parametrize(

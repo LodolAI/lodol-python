@@ -45,6 +45,26 @@ FINISHED_STATUSES = frozenset(
 )
 
 
+class StepStatus(str, Enum):
+    """How a step of a run went. ``Step.status`` holds one of these values as
+    text, so ``step.status == "failed"`` and ``step.status ==
+    StepStatus.FAILED`` agree. A status this version doesn't list may still
+    appear, as text."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    """It failed. ``Step.error`` says why."""
+    CONTINUED = "continued"
+    """It failed, but its setting let the run carry on. ``Step.error`` says
+    what went wrong."""
+    SKIPPED = "skipped"
+    """It is turned off, so the run passed over it. ``Step.reason`` says so,
+    and it has no ``result``."""
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+
 class ApprovalStatus(str, Enum):
     """Where an approval request is. ``Approval.status`` holds one of these
     values as text."""
@@ -205,18 +225,32 @@ class Step:
 
     index: int
     status: str
-    """``"completed"`` or ``"failed"``. A step inside a loop reports its last pass."""
+    """One of :class:`StepStatus`, as text. A step inside a loop reports its
+    last pass."""
     result: Any = field(default=None, hash=False)
     error: Any = field(default=None, hash=False)
+    """What went wrong, for a step that failed or carried on after failing."""
+    reason: str | None = None
+    """Why a skipped step didn't run."""
+    attempts: int | None = None
+    """How many tries the step took, when it retried. ``None`` when Lodol
+    didn't say."""
 
     @classmethod
     def from_api(cls, data: Mapping[str, Any]) -> Step:
         index = data.get("index")
+        attempts = data.get("attempts")
         return cls(
             index=index if isinstance(index, int) else -1,
             status=str(data.get("status") or ""),
             result=data.get("result"),
             error=data.get("error"),
+            reason=_optional_str(data.get("reason")),
+            attempts=(
+                attempts
+                if isinstance(attempts, int) and not isinstance(attempts, bool)
+                else None
+            ),
         )
 
 

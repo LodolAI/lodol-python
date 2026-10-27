@@ -23,6 +23,7 @@ from lodol import (
     RunFailedError,
     RunStatus,
     Step,
+    StepStatus,
     WaitTimeoutError,
     Workflow,
 )
@@ -401,6 +402,48 @@ def test_a_failure_without_a_run_error_names_the_failed_steps(
 
     with pytest.raises(RunFailedError, match="Run 683b failed: Sheet not found"):
         client.runs.wait("683b")
+
+
+def test_a_step_that_carried_on_isnt_named_as_the_failure(
+    client: Lodol, api: FakeAPI
+) -> None:
+    failed = run_json(
+        status="failed",
+        steps=[
+            {"index": 0, "status": "continued", "error": "Slack didn't answer"},
+            {"index": 1, "status": "skipped", "reason": "This step is turned off."},
+            {"index": 2, "status": "failed", "error": "Sheet not found"},
+        ],
+    )
+    api.queue(respond(200, run_json(status="failed")), respond(200, failed))
+
+    with pytest.raises(RunFailedError) as exc:
+        client.runs.wait("683b")
+
+    assert str(exc.value) == "Run 683b failed: Sheet not found"
+
+
+def test_a_step_that_carried_on_doesnt_fail_the_run(
+    client: Lodol, api: FakeAPI
+) -> None:
+    steps = [
+        {"index": 0, "status": "continued", "error": "Slack didn't answer"},
+        {"index": 1, "status": "completed", "result": "Sent", "attempts": 3},
+    ]
+    api.queue(
+        respond(200, run_json(status="success")),
+        respond(200, run_json(status="success", steps=steps)),
+    )
+
+    run = client.runs.wait("683b")
+
+    assert run.succeeded
+    assert run.steps is not None
+    assert [step.status for step in run.steps] == [
+        StepStatus.CONTINUED,
+        StepStatus.COMPLETED,
+    ]
+    assert run.steps[1].attempts == 3
 
 
 def test_a_failure_with_no_reason_at_all(client: Lodol, api: FakeAPI) -> None:

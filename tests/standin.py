@@ -409,6 +409,20 @@ class Handler(BaseHTTPRequestHandler):
                 }
             ],
         }
+        if workflow_id == "665f":
+            run["steps"] += [
+                # Failed, and its setting let the run carry on, after
+                # trying three times.
+                {
+                    "index": 1,
+                    "status": "continued",
+                    "result": None,
+                    "error": "Slack didn't answer",
+                    "attempts": 3,
+                },
+                # Turned off: no result, only why.
+                {"index": 2, "status": "skipped", "reason": "This step is turned off."},
+            ]
         state.runs.insert(0, run)
         state.polls[run_id] = 0
         return run

@@ -82,6 +82,8 @@ else:
 
 The finished run comes with its outputs (`run.outputs`) and its step results (`run.steps`). An output the run never set is `None`. `RunFailedError` carries the run too, as `error.run`, so you can see which step failed. If the run has finished but its step results can't be fetched in time, you get the run without them rather than an error. Without a `timeout`, `wait` waits as long as the run takes, including while it waits for someone to answer an approval.
 
+Each step's `status` is one of `StepStatus`: `"completed"`, `"failed"`, `"continued"` (it failed, but its setting let the run carry on; `step.error` says what went wrong) or `"skipped"` (it's turned off, so it has no result, and `step.reason` says so). A step that retried says how many tries it took in `step.attempts`.
+
 ## Retry a failed run
 
 ```python
