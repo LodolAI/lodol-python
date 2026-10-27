@@ -111,6 +111,15 @@ for run in lodol.runs.list(workflow="665f...", limit=20):
 Runs come newest first. Loop over the result and pages are fetched as you go, so stopping early costs nothing extra. Leave out `limit` to go through all of them, and `workflow` to see every workflow's runs. Listed runs leave out `outputs` and `steps`; `runs.get` has them. A failed run says why in `run.error`, listed or not.
 
 ```python
+from datetime import date
+
+for run in lodol.runs.list(status="failed", started_from=date(2026, 10, 1)):
+    print(run.started_at, run.workflow_name, run.error)
+```
+
+`status` takes one status or several (`status=["failed", "stopped"]`). `started_from` and `started_to` bound when runs started, `started_to` itself left out: a `date` is the start of that day, UTC, and a `datetime` without a timezone is taken as UTC. `search` finds runs by their workflow's name or a value in their data, such as a client's name in their inputs. A status runs can't be listed by, such as a typo, raises `ValueError` before anything is sent, rather than quietly listing every run.
+
+```python
 run = lodol.runs.get("683b...", include_steps=True)
 lodol.runs.stop(run)
 ```

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from typing import Any
 
@@ -98,6 +99,144 @@ def test_list_one_workflows_runs(client: Lodol, api: FakeAPI) -> None:
     list(client.runs.list(workflow=Workflow(id="665f", name="Monthly report"), limit=5))
 
     assert api.sent()[2] == {"limit": "5", "workflow_id": "665f"}
+
+
+def test_list_failed_runs_since_a_date(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, runs_page("r1")))
+
+    list(client.runs.list(status="failed", started_from=dt.date(2026, 10, 1)))
+
+    assert api.sent()[2] == {"limit": "100", "status": "failed", "from": "2026-10-01"}
+
+
+def test_list_by_several_statuses_on_every_page(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(200, runs_page(*[f"r{i}" for i in range(100)])),
+        respond(200, runs_page("r100")),
+    )
+
+    runs = client.runs.list(
+        status=["failed", RunStatus.STOPPED, "failed"], search=" Acme "
+    )
+
+    assert len(list(runs)) == 101
+    for request in api.requests:
+        # Repeated, once each, as the API takes several.
+        assert request.url.params.get_list("status") == ["failed", "stopped"]
+        assert request.url.params["search"] == "Acme"
+    assert api.requests[1].url.params["after"] == "r99"
+
+
+def test_a_status_given_as_a_runstatus(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, runs_page("r1")))
+
+    list(client.runs.list(status=RunStatus.AWAITING_APPROVAL))
+
+    assert api.sent()[2]["status"] == "awaiting_approval"
+
+
+@pytest.mark.parametrize(
+    ("started_from", "started_to", "sent"),
+    [
+        # A time without a timezone goes as it is; Lodol reads it as UTC.
+        (
+            dt.datetime(2026, 10, 1, 9, 30),
+            None,
+            {"from": "2026-10-01T09:30:00"},
+        ),
+        (
+            None,
+            dt.datetime(2026, 10, 1, 9, 30, tzinfo=dt.timezone(dt.timedelta(hours=2))),
+            {"to": "2026-10-01T09:30:00+02:00"},
+        ),
+        (
+            dt.date(2026, 10, 1),
+            dt.datetime(2026, 10, 1, 0, 0, 1),
+            {"from": "2026-10-01", "to": "2026-10-01T00:00:01"},
+        ),
+    ],
+)
+def test_list_by_when_runs_started(
+    client: Lodol,
+    api: FakeAPI,
+    started_from: dt.date | None,
+    started_to: dt.date | None,
+    sent: dict[str, str],
+) -> None:
+    api.queue(respond(200, runs_page("r1")))
+
+    list(client.runs.list(started_from=started_from, started_to=started_to))
+
+    assert api.sent()[2] == {"limit": "100", **sent}
+
+
+@pytest.mark.parametrize(
+    ("started_from", "started_to"),
+    [
+        (dt.date(2026, 10, 2), dt.date(2026, 10, 1)),
+        (dt.date(2026, 10, 1), dt.date(2026, 10, 1)),
+        # A date is the start of its day.
+        (dt.date(2026, 10, 1), dt.datetime(2026, 10, 1)),
+        # 10:00 at UTC+2 is 08:00 UTC, before 09:00 UTC.
+        (
+            dt.datetime(2026, 10, 1, 9, 0),
+            dt.datetime(2026, 10, 1, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=2))),
+        ),
+    ],
+)
+def test_a_range_that_ends_before_it_starts_is_refused(
+    client: Lodol, api: FakeAPI, started_from: dt.date, started_to: dt.date
+) -> None:
+    with pytest.raises(ValueError, match="started_to .* must be after started_from"):
+        client.runs.list(started_from=started_from, started_to=started_to)
+
+    assert api.requests == []
+
+
+def test_a_status_runs_arent_listed_by_is_refused(client: Lodol, api: FakeAPI) -> None:
+    """Lodol ignores a status it doesn't know, and with none left lists every
+    run: a typo in a loop that deletes would delete them all."""
+    with pytest.raises(ValueError) as exc:
+        client.runs.list(status=["failed", "faild"])
+
+    assert str(exc.value) == (
+        "'faild' isn't a status runs can be listed by. Use one of 'queued', "
+        "'running', 'waiting', 'awaiting_approval', 'paused', 'success', "
+        "'failed', 'stopped'."
+    )
+    assert api.requests == []
+
+
+def test_stopping_isnt_a_status_runs_are_listed_by(client: Lodol) -> None:
+    with pytest.raises(ValueError, match="listed as 'running' until it has stopped"):
+        client.runs.list(status=RunStatus.STOPPING)
+
+
+@pytest.mark.parametrize(
+    ("filters", "error", "complaint"),
+    [
+        ({"status": []}, ValueError, "status is an empty list"),
+        ({"status": 3}, TypeError, "a status, or a list of them, not int"),
+        ({"status": [RunStatus.FAILED, 3]}, TypeError, "text or a RunStatus, not int"),
+        ({"status": b"failed"}, TypeError, "text or a RunStatus, not int"),
+        ({"started_from": "2026-10-01"}, TypeError, "a datetime or a date, not str"),
+        ({"started_to": 1759276800}, TypeError, "a datetime or a date, not int"),
+        ({"search": "  "}, ValueError, "search is empty"),
+        ({"search": 4471}, TypeError, "search must be text, not int"),
+        ({"workflow": 665}, TypeError, "workflow id or a Workflow"),
+    ],
+)
+def test_filters_are_checked_before_anything_is_sent(
+    client: Lodol,
+    api: FakeAPI,
+    filters: dict[str, Any],
+    error: type[Exception],
+    complaint: str,
+) -> None:
+    with pytest.raises(error, match=complaint):
+        client.runs.list(**filters)
+
+    assert api.requests == []
 
 
 def test_each_loop_starts_from_the_newest(client: Lodol, api: FakeAPI) -> None:

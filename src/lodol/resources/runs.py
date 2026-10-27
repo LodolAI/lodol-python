@@ -3,9 +3,10 @@ delete one."""
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from lodol import _transport, constants
 from lodol._transport import (
@@ -28,7 +29,7 @@ from lodol.exceptions import (
     RunFailedError,
     WaitTimeoutError,
 )
-from lodol.models import DeletedRun, Run, Workflow
+from lodol.models import DeletedRun, Run, RunStatus, Workflow
 from lodol.pagination import AsyncPaginator, Paginator, check_limit
 from lodol.resources._common import object_id
 
@@ -37,12 +38,21 @@ if TYPE_CHECKING:  # pragma: no cover - only for type hints
 
 RunRef = str | Run
 WorkflowRef = str | Workflow
+# A list's query, beside its page size and cursor.
+Filters = dict[str, str | list[str]]
 
 logger = logging.getLogger("lodol")
 
 # Trouble a wait rides out: it says nothing about the run, only that one look
 # at it didn't work out.
 _PASSING_TROUBLE = (APIConnectionError, InternalServerError, RateLimitError)
+
+# The statuses runs can be listed by: every one a run is kept in. A run reads
+# "stopping" only in what stopping it returns; Lodol lists it as running until
+# it has stopped, and would ignore "stopping" as a filter, listing every run.
+_LISTED_STATUSES = tuple(
+    status.value for status in RunStatus if status is not RunStatus.STOPPING
+)
 
 # A run that hasn't finished, as a sentence says it.
 _UNFINISHED = {
@@ -62,20 +72,39 @@ class Runs:
         self._client = client
 
     def list(
-        self, *, workflow: WorkflowRef | None = None, limit: int | None = None
+        self,
+        *,
+        workflow: WorkflowRef | None = None,
+        status: str | Iterable[str] | None = None,
+        started_from: dt.datetime | dt.date | None = None,
+        started_to: dt.datetime | dt.date | None = None,
+        search: str | None = None,
+        limit: int | None = None,
     ) -> Paginator[Run]:
-        """Runs, newest first: all of the workspace's, or one workflow's
-        (every version of it).
+        """Runs, newest first: all of the workspace's, or those that match.
+
+        - ``workflow``: one workflow's runs (every version of it).
+        - ``status``: runs in a status, or in any of several, given as
+          :class:`RunStatus` members or their text (``"failed"``). Any but
+          ``"stopping"``, which a run reads only as it is stopped, can be
+          given; anything else raises ``ValueError`` before anything is sent,
+          so a typo can't make the list every run.
+        - ``started_from`` and ``started_to``: runs that started at or after
+          ``started_from``, and before ``started_to``. A ``date`` is the start
+          of that day, UTC. A ``datetime`` without a timezone is sent as it
+          is, and Lodol reads it as UTC.
+        - ``search``: runs whose workflow's name, or a value in whose data
+          (what they started with, handed back or failed with), matches.
 
         Loop over the result; pages are fetched as you go. ``limit`` stops
         after that many runs. Listed runs leave out ``outputs`` and ``steps``:
         ``runs.get`` has them.
         """
-        workflow_id = _workflow_filter(workflow)
+        filters = _list_filters(workflow, status, started_from, started_to, search)
         limit = check_limit(limit)
 
         def fetch_page(cursor: str | None, size: int) -> tuple[list[Run], str | None]:
-            response = self._client._send(_list_request(workflow_id, cursor, size))
+            response = self._client._send(_list_request(filters, cursor, size))
             return _parse_page(response, size)
 
         return Paginator(fetch_page, limit=limit, noun="runs")
@@ -202,24 +231,41 @@ class AsyncRuns:
         self._client = client
 
     def list(
-        self, *, workflow: WorkflowRef | None = None, limit: int | None = None
+        self,
+        *,
+        workflow: WorkflowRef | None = None,
+        status: str | Iterable[str] | None = None,
+        started_from: dt.datetime | dt.date | None = None,
+        started_to: dt.datetime | dt.date | None = None,
+        search: str | None = None,
+        limit: int | None = None,
     ) -> AsyncPaginator[Run]:
-        """Runs, newest first: all of the workspace's, or one workflow's
-        (every version of it).
+        """Runs, newest first: all of the workspace's, or those that match.
+
+        - ``workflow``: one workflow's runs (every version of it).
+        - ``status``: runs in a status, or in any of several, given as
+          :class:`RunStatus` members or their text (``"failed"``). Any but
+          ``"stopping"``, which a run reads only as it is stopped, can be
+          given; anything else raises ``ValueError`` before anything is sent,
+          so a typo can't make the list every run.
+        - ``started_from`` and ``started_to``: runs that started at or after
+          ``started_from``, and before ``started_to``. A ``date`` is the start
+          of that day, UTC. A ``datetime`` without a timezone is sent as it
+          is, and Lodol reads it as UTC.
+        - ``search``: runs whose workflow's name, or a value in whose data
+          (what they started with, handed back or failed with), matches.
 
         Loop over the result with ``async for``; pages are fetched as you go.
         ``limit`` stops after that many runs. Listed runs leave out
         ``outputs`` and ``steps``: ``runs.get`` has them.
         """
-        workflow_id = _workflow_filter(workflow)
+        filters = _list_filters(workflow, status, started_from, started_to, search)
         limit = check_limit(limit)
 
         async def fetch_page(
             cursor: str | None, size: int
         ) -> tuple[list[Run], str | None]:
-            response = await self._client._send(
-                _list_request(workflow_id, cursor, size)
-            )
+            response = await self._client._send(_list_request(filters, cursor, size))
             return _parse_page(response, size)
 
         return AsyncPaginator(fetch_page, limit=limit, noun="runs")
@@ -574,16 +620,105 @@ def _describe(status: str) -> str:
     return _UNFINISHED.get(status, status)
 
 
-def _workflow_filter(workflow: WorkflowRef | None) -> str | None:
-    if workflow is None:
-        return None
-    return object_id(workflow, Workflow, "workflow")
+def _list_filters(
+    workflow: WorkflowRef | None,
+    status: str | Iterable[str] | None,
+    started_from: dt.datetime | dt.date | None,
+    started_to: dt.datetime | dt.date | None,
+    search: str | None,
+) -> Filters:
+    """What ``runs.list`` narrows the list to, as its query, checked before
+    anything is sent: Lodol ignores a filter it can't use, and would list
+    every run instead."""
+    filters: Filters = {}
+    if workflow is not None:
+        filters["workflow_id"] = object_id(workflow, Workflow, "workflow")
+    statuses = _status_filter(status)
+    if statuses:
+        filters["status"] = statuses
+    start = _start_bound(started_from, "started_from")
+    end = _start_bound(started_to, "started_to")
+    if start is not None and end is not None and _as_utc(end) <= _as_utc(start):
+        raise ValueError(
+            f"started_to ({end.isoformat()}) must be after started_from "
+            f"({start.isoformat()}): runs that started at started_to aren't listed"
+        )
+    if start is not None:
+        filters["from"] = start.isoformat()
+    if end is not None:
+        filters["to"] = end.isoformat()
+    if search is not None:
+        if not isinstance(search, str):
+            raise TypeError(f"search must be text, not {type(search).__name__}")
+        if not search.strip():
+            raise ValueError(
+                "search is empty: give the text to look for, or leave it out "
+                "to list every run"
+            )
+        filters["search"] = search.strip()
+    return filters
 
 
-def _list_request(workflow_id: str | None, cursor: str | None, size: int) -> APIRequest:
-    params = {"limit": str(size)}
-    if workflow_id is not None:
-        params["workflow_id"] = workflow_id
+def _status_filter(status: str | Iterable[str] | None) -> list[str]:
+    if status is None:
+        return []
+    if isinstance(status, str):
+        given = [status]
+    else:
+        try:
+            given = list(status)
+        except TypeError:
+            raise TypeError(
+                "status must be a status, or a list of them, not "
+                f"{type(status).__name__}"
+            ) from None
+        if not given:
+            raise ValueError(
+                "status is an empty list: name at least one status, or leave it "
+                "out to list runs in any status"
+            )
+    statuses: list[str] = []
+    for item in given:
+        if not isinstance(item, str):
+            raise TypeError(
+                f"Each status must be text or a RunStatus, not {type(item).__name__}"
+            )
+        value = item.value if isinstance(item, RunStatus) else item
+        if value not in _LISTED_STATUSES:
+            why = (
+                ": a run that is stopping is listed as 'running' until it has stopped"
+                if value == RunStatus.STOPPING.value
+                else ""
+            )
+            raise ValueError(
+                f"{value!r} isn't a status runs can be listed by{why}. Use one of "
+                f"{', '.join(map(repr, _LISTED_STATUSES))}."
+            )
+        if value not in statuses:
+            statuses.append(value)
+    return statuses
+
+
+def _start_bound(
+    value: dt.datetime | dt.date | None, name: str
+) -> dt.datetime | dt.date | None:
+    if value is None or isinstance(value, dt.date):
+        return value
+    raise TypeError(f"{name} must be a datetime or a date, not {type(value).__name__}")
+
+
+def _as_utc(value: dt.date) -> dt.datetime:
+    """A bound as Lodol reads it: a date is the start of that day, and a time
+    without a timezone is UTC."""
+    if not isinstance(value, dt.datetime):
+        return dt.datetime(value.year, value.month, value.day, tzinfo=dt.timezone.utc)
+    if value.utcoffset() is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value
+
+
+def _list_request(filters: Filters, cursor: str | None, size: int) -> APIRequest:
+    params: Filters = {"limit": str(size), **filters}
     if cursor is not None:
         params["after"] = cursor
     return APIRequest("GET", "/executions", params=params)

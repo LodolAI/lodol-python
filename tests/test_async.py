@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+
 import httpx2
 import pytest
 
@@ -108,6 +110,32 @@ async def test_list_pages_with_async_for(aclient: AsyncLodol, api: FakeAPI) -> N
 
     assert len(ids) == 101
     assert api.sent(1)[2] == {"limit": "100", "workflow_id": "665f", "after": "r99"}
+
+
+async def test_list_with_filters(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"executions": [run_json(execution_id="r1")]}))
+
+    runs = aclient.runs.list(
+        status=["failed", "stopped"],
+        started_from=dt.date(2026, 10, 1),
+        started_to=dt.datetime(2026, 11, 1),
+        search="Acme",
+    )
+
+    assert [run.id async for run in runs] == ["r1"]
+    params = api.last.url.params
+    assert params.get_list("status") == ["failed", "stopped"]
+    assert (params["from"], params["to"]) == ("2026-10-01", "2026-11-01T00:00:00")
+    assert params["search"] == "Acme"
+
+
+async def test_a_bad_filter_is_refused_before_anything_is_sent(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    with pytest.raises(ValueError, match="'faild' isn't a status"):
+        aclient.runs.list(status="faild")
+
+    assert api.requests == []
 
 
 async def test_list_with_a_limit(aclient: AsyncLodol, api: FakeAPI) -> None:

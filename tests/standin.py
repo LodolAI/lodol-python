@@ -8,6 +8,7 @@ answer replayed; reused for something else: 422).
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import itertools
 import json
@@ -102,6 +103,8 @@ class StandIn:
 
 class Handler(BaseHTTPRequestHandler):
     server: Server
+    # Every value of each query parameter, for those that repeat.
+    query_lists: dict[str, list[str]]
 
     def log_message(self, *_args: Any) -> None:  # keep test output clean
         pass
@@ -151,7 +154,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         url = urlsplit(self.path)
         parts = [p for p in url.path.split("/") if p][2:]  # drop "api", "v1"
-        query = {k: v[0] for k, v in parse_qs(url.query).items()}
+        self.query_lists = parse_qs(url.query)
+        query = {k: v[0] for k, v in self.query_lists.items()}
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         with state.lock:
@@ -193,6 +197,10 @@ class Handler(BaseHTTPRequestHandler):
             runs = state.runs
             if "workflow_id" in query:
                 runs = [r for r in runs if r["workflow_id"] == query["workflow_id"]]
+            try:
+                runs = self._filtered(runs, query, self.query_lists)
+            except ValueError as exc:
+                return self._error(400, str(exc))
             if "after" in query:
                 ids = [r["execution_id"] for r in runs]
                 runs = runs[ids.index(query["after"]) + 1 :]
@@ -471,6 +479,44 @@ class Handler(BaseHTTPRequestHandler):
                 run["outputs"] = dict(_OUTPUTS[run["workflow_id"]])
 
     @staticmethod
+    def _filtered(
+        runs: list[dict[str, Any]], query: dict[str, str], lists: dict[str, list[str]]
+    ) -> list[dict[str, Any]]:
+        # As the server reads them. It leaves out a status it doesn't know,
+        # and with none left, doesn't filter by status at all.
+        statuses = [
+            status
+            for status in (s.strip().lower() for s in lists.get("status", []))
+            if status in _KNOWN_STATUSES
+        ]
+        if statuses:
+            runs = [r for r in runs if r["status"] in statuses]
+        start = _run_time(query.get("from"), "from")
+        end = _run_time(query.get("to"), "to")
+        if start is not None and end is not None and end <= start:
+            raise ValueError("The end of the date range must be after its start.")
+        if start is not None or end is not None:
+            # By when a run started: one still queued hasn't.
+            runs = [
+                r
+                for r in runs
+                if r["started_at"] is not None
+                and (start is None or _started(r) >= start)
+                and (end is None or _started(r) < end)
+            ]
+        search = (query.get("search") or "").strip().lower()
+        if search:
+            runs = [
+                r
+                for r in runs
+                if search
+                in json.dumps(
+                    [r["workflow_name"], r["inputs"], r["outputs"], r["error"]]
+                ).lower()
+            ]
+        return runs
+
+    @staticmethod
     def _listed(run: dict[str, Any]) -> dict[str, Any]:
         # As GET /executions lists a run: no outputs, no steps.
         fields = (
@@ -544,6 +590,51 @@ class Handler(BaseHTTPRequestHandler):
                 "via": "api",
             }
         return 200, approval
+
+
+# Every status the server keeps a run in, and so knows as a filter.
+_KNOWN_STATUSES = frozenset(
+    {
+        "queued",
+        "running",
+        "success",
+        "failed",
+        "stopped",
+        "paused",
+        "awaiting_review",
+        "awaiting_input",
+        "awaiting_approval",
+        "waiting",
+        "waiting_for_trigger",
+        "unknown",
+    }
+)
+
+
+def _run_time(raw: str | None, name: str) -> dt.datetime | None:
+    # As the server reads one: a date alone is the start of that day, and a
+    # time without an offset is UTC.
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip()
+    if text[-1] in "Zz":
+        text = text[:-1] + "+00:00"
+    try:
+        moment = dt.datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(
+            f"{name} must be a date or time in ISO 8601, like 2026-10-15 or "
+            "2026-10-15T09:30:00Z."
+        ) from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return moment
+
+
+def _started(run: dict[str, Any]) -> dt.datetime:
+    started = _run_time(run["started_at"], "started_at")
+    assert started is not None
+    return started
 
 
 # Why each workflow's runs fail, for those that do.

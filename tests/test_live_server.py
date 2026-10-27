@@ -3,6 +3,9 @@ in ``tests/standin.py``."""
 
 from __future__ import annotations
 
+import datetime as dt
+from typing import Any
+
 import pytest
 
 from lodol import (
@@ -15,6 +18,7 @@ from lodol import (
     NotFoundError,
     RetryOptions,
     RunFailedError,
+    RunStatus,
     UnprocessableEntityError,
 )
 from tests.standin import KEY, Server, address
@@ -204,6 +208,42 @@ def test_a_run_hands_back_its_outputs(server: Server) -> None:
     assert run.outputs == {"total": 1250}
     # A list is a summary; the run itself has what it handed back.
     assert listed.outputs == {}
+
+
+def test_finding_runs(server: Server) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        report = lodol.workflows.run("665f", inputs={"client": "Acme"}, wait=True)
+        for workflow_id in ("7a1c", "5c3d"):
+            with pytest.raises(RunFailedError):
+                lodol.workflows.run(workflow_id, wait=True)
+        queued = lodol.workflows.run("665f", inputs={"client": "Globex"})
+
+        def ids(**filters: Any) -> list[str]:
+            return [run.id for run in lodol.runs.list(**filters)]
+
+        assert ids(status="failed") == ["r3", "r2"]
+        assert ids(status=["failed", RunStatus.SUCCESS], limit=2) == ["r3", "r2"]
+        assert ids(status=["failed", RunStatus.SUCCESS]) == ["r3", "r2", report.id]
+        assert ids(status="queued") == [queued.id]
+        # By a value in its data, or its workflow's name.
+        assert ids(search="globex") == [queued.id]
+        assert ids(search="Always fails") == ["r2"]
+        # By when they started: a run still queued hasn't.
+        assert ids(started_from=dt.date(2026, 10, 13)) == ["r3", "r2", report.id]
+        assert ids(started_to=dt.date(2026, 10, 13)) == []
+        # They started at 09:00:01 UTC, which is 11:00:01 at UTC+2.
+        two_hours_ahead = dt.timezone(dt.timedelta(hours=2))
+        assert len(ids(started_from=dt.datetime(2026, 10, 13, 9, 0, 1))) == 3
+        assert ids(started_from=dt.datetime(2026, 10, 13, 9, 0, 2)) == []
+        at_utc_plus_two = dt.datetime(2026, 10, 13, 11, 0, 1, tzinfo=two_hours_ahead)
+        assert len(ids(started_to=at_utc_plus_two)) == 0
+        assert len(ids(started_from=at_utc_plus_two)) == 3
+
+        # What the SDK refuses, Lodol would have taken as no filter at all.
+        unfiltered = lodol.request("GET", "/executions", params={"status": "faild"})
+        assert len(unfiltered["executions"]) == 4
+        with pytest.raises(ValueError, match="'faild' isn't a status"):
+            lodol.runs.list(status="faild")
 
 
 def test_retrying_a_failed_run(server: Server) -> None:
