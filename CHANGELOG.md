@@ -8,7 +8,7 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 
 - **Outputs.** `run.outputs` holds what a run handed back, by the names its workflow declares, and `workflow.outputs` lists them, so a script reads results instead of digging through step results.
 - **`AsyncLodol`**: everything `Lodol` does, for asyncio and trio.
-- **Approvals.** `lodol.approvals` lists the approval requests runs are waiting on, and answers them with `approve`, `reject` or `reply`.
+- **Approvals.** `lodol.approvals` lists the approval requests runs are waiting on, and answers them with `approve`, `reject` or `reply`. Answering one that's no longer pending raises `ConflictError` with a `code` saying why: `"approval_already_answered"`, `"approval_expired"` or `"approval_withdrawn"`.
 - **Deleting runs.** `runs.delete(run)` removes a finished run, and the runs it started, from the history. It needs a key with the new **Delete runs** scope.
 - **Retrying a failed run.** `runs.retry(run)` runs it again with the data it started with, picking up at the step that failed without running the steps before it again, or, with `from_start=True`, from the top. `run.retry_options` says which retries a run offers, and a retry's `run.retry_of` names the run it retried.
 - **Lists you just loop over.** `runs.list()` and `approvals.list()` fetch pages as you go, newest first; `limit=` stops early.
@@ -24,7 +24,7 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - Models can be hashed, and errors can be pickled, so both cross process boundaries (multiprocessing, task queues).
 - `LODOL_LOG=info` or `LODOL_LOG=debug` turns on logging.
 
-0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener`, `retry_options` and `request_id` the SDK relies on, retries runs, and filters runs by status, start time and search. Update an older Lodol Local before upgrading.
+0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener`, `retry_options` and `request_id` the SDK relies on, retries runs, filters runs by status, start time and search, and says why an approval request can't be answered. Update an older Lodol Local before upgrading.
 
 ### Fixed
 

@@ -137,8 +137,14 @@ class NotFoundError(APIStatusError):
 
 
 class ConflictError(APIStatusError):
-    """409: the request collides with the state of things, such as answering
-    an approval request someone else already answered."""
+    """409: the request collides with the state of things.
+
+    Answering an approval request that is no longer pending says why in
+    ``code``: ``"approval_already_answered"`` (someone answered it first),
+    ``"approval_expired"`` (nobody answered in time: it closed, or the
+    step's time limit decided it automatically) or ``"approval_withdrawn"``
+    (the run was stopped, or its workflow deleted, before anyone answered).
+    """
 
 
 class UnprocessableEntityError(APIStatusError):

@@ -220,11 +220,30 @@ def test_a_reply_must_be_text(client: Lodol) -> None:
         client.approvals.reply("a1", 4471)  # type: ignore[arg-type]
 
 
-def test_answering_a_settled_request_is_a_conflict(client: Lodol, api: FakeAPI) -> None:
-    api.queue(respond(409, {"error": "This request has already been decided."}))
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("approval_already_answered", "This request has already been decided."),
+        ("approval_expired", "Nobody decided this request in time, so it has closed."),
+        (
+            "approval_expired",
+            "Nobody decided this request in time, so it was rejected automatically.",
+        ),
+        ("approval_withdrawn", "This request was withdrawn. The run was stopped."),
+    ],
+)
+def test_answering_a_settled_request_says_what_happened_to_it(
+    client: Lodol, api: FakeAPI, code: str, message: str
+) -> None:
+    api.queue(respond(409, {"error": message, "error_code": code}))
 
-    with pytest.raises(ConflictError, match="already been decided"):
+    with pytest.raises(ConflictError) as exc:
         client.approvals.approve("a1")
+
+    assert exc.value.code == code
+    assert str(exc.value) == message
+    # Nothing about the request changes by asking again.
+    assert len(api.requests) == 1
 
 
 @pytest.mark.parametrize(

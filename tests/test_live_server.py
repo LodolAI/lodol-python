@@ -10,6 +10,7 @@ import pytest
 
 from lodol import (
     APITimeoutError,
+    ApprovalStatus,
     AsyncLodol,
     AuthenticationError,
     BadRequestError,
@@ -69,8 +70,9 @@ def test_the_whole_journey(server: Server) -> None:
             approved.decision is not None
             and approved.decision.decided_by == "API key 'e2e'"
         )
-        with pytest.raises(ConflictError):
+        with pytest.raises(ConflictError) as conflict:
             lodol.approvals.reject(pending[1])
+        assert conflict.value.code == "approval_already_answered"
         assert list(lodol.approvals.list()) == []
 
         deleted = lodol.workflows.delete(report)
@@ -116,6 +118,51 @@ def test_approvals_the_key_cant_see_dont_cut_a_list_short(server: Server) -> Non
         assert [a.id for a in lodol.approvals.list()] == ["a6", "a4", "a1"]
         with pytest.raises(NotFoundError):
             lodol.approvals.get("a5")
+
+
+def test_a_request_no_longer_pending_says_what_happened_to_it(
+    server: Server,
+) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        run = lodol.workflows.run("665f", inputs={"client": "Acme"})
+        server.state.approvals = [
+            {"id": "a5", "kind": "approval", "status": "pending", "title": "Stop?"},
+            {"id": "a4", "kind": "reply", "status": "pending", "title": "Why?"},
+            {"id": "a3", "kind": "approval", "status": "expired", "title": "Late"},
+            {
+                "id": "a2",
+                "kind": "approval",
+                "status": "approved",
+                "title": "Timed out",
+                "decision": {"decision": "approved", "via": "timeout"},
+            },
+            {"id": "a1", "kind": "approval", "status": "pending", "title": "Fine"},
+        ]
+        for approval in server.state.approvals:
+            approval.update(execution_id="r0", workflow_id="665f")
+        server.state.approvals[0]["execution_id"] = run.id
+        server.state.approvals[1]["workflow_id"] = "9b2e"
+        lodol.runs.stop(run)
+        lodol.workflows.delete("9b2e")
+        lodol.approvals.approve("a1")
+
+        def refusal(approval_id: str) -> ConflictError:
+            with pytest.raises(ConflictError) as refused:
+                lodol.approvals.approve(approval_id)
+            return refused.value
+
+        withdrawn_by_stop, withdrawn_by_delete = refusal("a5"), refusal("a4")
+        assert withdrawn_by_stop.code == "approval_withdrawn"
+        assert withdrawn_by_stop.message == (
+            "This request was withdrawn. The run was stopped."
+        )
+        assert withdrawn_by_delete.code == "approval_withdrawn"
+        assert refusal("a3").code == "approval_expired"
+        timed_out = refusal("a2")
+        assert timed_out.code == "approval_expired"
+        assert "it was approved automatically" in timed_out.message
+        assert refusal("a1").code == "approval_already_answered"
+        assert lodol.approvals.get("a5").status == ApprovalStatus.CANCELLED
 
 
 def test_your_own_key_starts_a_run_once(server: Server) -> None:

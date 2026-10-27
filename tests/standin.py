@@ -182,6 +182,9 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET":
                 return self._reply(200, {**workflow, "program": {"kind": "Program"}})
             del state.workflows[parts[1]]
+            self._withdraw(
+                state, because="The workflow was deleted.", workflow_id=parts[1]
+            )
             return self._reply(
                 200, {"id": workflow["id"], "name": workflow["name"], "deleted": True}
             )
@@ -241,6 +244,11 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 # A run in progress is asked to stop, and stops just after.
                 run["status"] = "stopped"
+                self._withdraw(
+                    state,
+                    because="The run was stopped.",
+                    execution_id=run["execution_id"],
+                )
                 return self._reply(
                     200, {"execution_id": run["execution_id"], "status": "stopping"}
                 )
@@ -580,13 +588,59 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return approval
 
+    @staticmethod
+    def _settled(approval: dict[str, Any]) -> dict[str, str]:
+        # Why a request can't be answered any more, in the server's words.
+        asks_for_reply = approval["kind"] == "reply"
+        nobody = "Nobody replied to" if asks_for_reply else "Nobody decided"
+        if approval["status"] == "cancelled":
+            withdrawn = [
+                event
+                for event in approval.get("events") or []
+                if event.get("type") == "cancelled"
+            ]
+            detail = withdrawn[-1].get("detail") if withdrawn else None
+            return {
+                "error": "This request was withdrawn."
+                + (f" {detail}" if detail else ""),
+                "error_code": "approval_withdrawn",
+            }
+        if approval["status"] == "expired":
+            return {
+                "error": f"{nobody} this request in time, so it has closed.",
+                "error_code": "approval_expired",
+            }
+        if (approval.get("decision") or {}).get("via") == "timeout":
+            return {
+                "error": f"{nobody} this request in time, so it was "
+                f"{approval['status']} automatically.",
+                "error_code": "approval_expired",
+            }
+        answered = "answered" if asks_for_reply else "decided"
+        return {
+            "error": f"This request has already been {answered}.",
+            "error_code": "approval_already_answered",
+        }
+
+    @staticmethod
+    def _withdraw(state: StandIn, *, because: str, **matching: str) -> None:
+        # As the server withdraws a run's pending requests when it stops.
+        for approval in state.approvals:
+            if approval["status"] == "pending" and all(
+                approval.get(name) == value for name, value in matching.items()
+            ):
+                approval["status"] = "cancelled"
+                approval.setdefault("events", []).append(
+                    {"type": "cancelled", "detail": because}
+                )
+
     def _decide(self, state: StandIn, approval_id: str, raw: bytes) -> tuple[int, Any]:
         approval = self._approval(state, approval_id)
         if approval is None:
             return 404, {"error": "Approval request not found."}
         data = json.loads(raw)
         if approval["status"] != "pending":
-            return 409, {"error": "This request has already been decided."}
+            return 409, self._settled(approval)
         if approval["kind"] == "reply":
             approval["status"] = "replied"
             approval["decision"] = {

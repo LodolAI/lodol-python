@@ -4,7 +4,8 @@ A workflow's Request approval step pauses its run until someone answers:
 approves or rejects it, or, for a request that asks for one, replies in
 writing. These let another system (a practice-management tool, an ERP, a
 script) do the answering. An answer sent with an API key is recorded as that
-key's.
+key's. Answering a request that is no longer pending raises
+``ConflictError``, whose ``code`` says what happened to it.
 """
 
 from __future__ import annotations

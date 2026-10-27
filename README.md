@@ -153,7 +153,9 @@ for approval in lodol.approvals.list():  # pending ones, newest first
         # or lodol.approvals.reject(approval, comment="Wrong amount")
 ```
 
-The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. If someone else answered first, or the request expired, you get `ConflictError`. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how.
+The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how.
+
+A request that's no longer pending can't be answered: you get `ConflictError`, whose `code` says what happened to it. `"approval_already_answered"`: someone answered it first. `"approval_expired"`: nobody answered in time, so it closed, or the step's time limit decided it automatically. `"approval_withdrawn"`: the run was stopped, or its workflow deleted, before anyone answered.
 
 ## Workflows
 
@@ -180,7 +182,7 @@ When Lodol or the network says no, the SDK raises a `LodolError`. Errors from th
 | `AuthenticationError` | The key is missing, wrong, revoked or expired | Check `LODOL_API_KEY` |
 | `PermissionDeniedError` | The key's scopes, or its creator's role, don't allow this | Give the key the scope, or use another key |
 | `NotFoundError` | No such workflow, run or approval in this workspace | Check the id |
-| `ConflictError` | An approval was already answered; or Lodol was still working on an earlier attempt of a request after five minutes | For an approval, nothing. Otherwise check before trying again: the message has the key to retry with |
+| `ConflictError` | An approval was already answered, expired or was withdrawn (`code` says which); or Lodol was still working on an earlier attempt of a request after five minutes | For an approval, nothing. Otherwise check before trying again: the message has the key to retry with |
 | `RunLimitError` | This month's runs are used up | Runs come back at `error.resets_at` |
 | `RateLimitError` | Too many requests, for longer than the SDK waits on its own | Wait `error.retry_after` seconds |
 | `APIConnectionError`, `APITimeoutError` | Lodol couldn't be reached, didn't answer, or had a certificate that couldn't be verified | Try again later; for a certificate, see the message |
