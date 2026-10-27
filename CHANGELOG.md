@@ -20,7 +20,7 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - `Workflow.is_draft`. Times are timezone-aware `datetime`s, step results are `Step` objects, which say why a step was skipped (`reason`) and how many tries it took (`attempts`), and `RunStatus`, `StepStatus` and `ApprovalStatus` list the statuses. A step that failed but was let carry on is `"continued"`, and never taken for the step that failed a run.
 - Dates, times, `Decimal`s and UUIDs in `inputs` are sent as text Lodol reads, and an input that can't be sent is named before anything is sent.
 - Any text works as an `idempotency_key`, and the same inputs are always sent byte for byte the same way, so a key always recognizes its request.
-- A workflow that starts from its own trigger, run with `wait=True` or waited on with `runs.wait`, returns at once with a warning: its run is it listening, and never ends. `run.is_trigger_listener` says so, since its status reads `"running"` the whole time. A failed run says why in `run.error` in `runs.list` too.
+- A workflow that starts from its own trigger, run with `wait=True` or waited on with `runs.wait`, returns at once with a warning, naming the workflow: its run is it listening, and never ends. `run.is_trigger_listener` says so, since its status reads `"running"` the whole time. A failed run says why in `run.error` in `runs.list` too.
 - Models can be hashed, and errors can be pickled, so both cross process boundaries (multiprocessing, task queues).
 - `LODOL_LOG=info` or `LODOL_LOG=debug` turns on logging.
 

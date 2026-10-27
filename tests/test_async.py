@@ -18,6 +18,7 @@ from lodol import (
     RunFailedError,
     RunLimitError,
     WaitTimeoutError,
+    Workflow,
 )
 from tests.conftest import (
     ApprovalsServer,
@@ -372,6 +373,17 @@ async def test_a_workflow_that_starts_itself_isnt_waited_for(
         run = await aclient.workflows.run("665f", wait=True)
 
     assert run.status == "running" and len(api.requests) == 1
+
+
+async def test_the_listening_warning_names_the_workflow(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    api.queue(respond(202, run_json(status="running", is_trigger_listener=True)))
+
+    with pytest.warns(UserWarning, match="'New invoices' starts from its own") as w:
+        await aclient.workflows.run(Workflow(id="9b2e", name="New invoices"), wait=True)
+
+    assert w[0].filename == __file__
 
 
 async def test_waiting_on_a_listening_workflow_returns_it(

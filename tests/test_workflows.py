@@ -323,6 +323,42 @@ def test_a_bad_timeout_is_refused_before_the_run_starts(
     assert api.requests == []
 
 
+@pytest.mark.parametrize(
+    ("workflow", "workflow_name", "named"),
+    [
+        # Lodol names it.
+        ("665f", "New invoices", "'New invoices'"),
+        # An older Lodol doesn't; the workflow in hand does.
+        (Workflow(id="665f", name="Invoices"), None, "'Invoices'"),
+        # Lodol's name is the current one.
+        (Workflow(id="665f", name="Invoices"), "New invoices", "'New invoices'"),
+        # Nothing names it.
+        ("665f", None, "This workflow"),
+        (Workflow(id="665f", name=""), None, "This workflow"),
+    ],
+)
+def test_the_listening_warning_names_the_workflow(
+    client: Lodol,
+    api: FakeAPI,
+    workflow: str | Workflow,
+    workflow_name: str | None,
+    named: str,
+) -> None:
+    started = run_json(status="running", is_trigger_listener=True)
+    if workflow_name is not None:
+        started["workflow_name"] = workflow_name
+    api.queue(respond(202, started))
+
+    with pytest.warns(UserWarning) as warned:
+        run = client.workflows.run(workflow, wait=True)
+
+    assert str(warned[0].message).startswith(f"{named} starts from its own trigger")
+    # Pointed at the caller's own line.
+    assert warned[0].filename == __file__
+    # The run is as Lodol gave it.
+    assert run.workflow_name == workflow_name
+
+
 def test_a_workflow_that_starts_itself_isnt_waited_for(
     client: Lodol, api: FakeAPI
 ) -> None:

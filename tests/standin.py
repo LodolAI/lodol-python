@@ -349,6 +349,7 @@ class Handler(BaseHTTPRequestHandler):
             "execution_id": run["execution_id"],
             "workflow_id": workflow_id,
             "version_id": "v" + workflow_id,
+            "workflow_name": workflow["name"],
             "status": "queued",
             "created_at": "2026-10-13T09:00:00+00:00",
             "is_trigger_listener": run["listening"],

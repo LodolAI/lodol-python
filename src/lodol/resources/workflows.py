@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any, Mapping
 
 from lodol._transport import (
@@ -79,7 +80,7 @@ class Workflows:
         started = Run.from_api(
             expect_object(self._client._send(request), "POST /workflows/{id}/run-async")
         )
-        if not wait or _listening(started):
+        if not wait or _listening(started, workflow):
             return started
         return self._client.runs.wait(started, timeout=timeout)
 
@@ -156,7 +157,7 @@ class AsyncWorkflows:
                 await self._client._send(request), "POST /workflows/{id}/run-async"
             )
         )
-        if not wait or _listening(started):
+        if not wait or _listening(started, workflow):
             return started
         return await self._client.runs.wait(started, timeout=timeout)
 
@@ -229,10 +230,14 @@ def _run_request(
     )
 
 
-def _listening(started: Run) -> bool:
+def _listening(started: Run, workflow: WorkflowRef) -> bool:
     """Whether a run just started is a workflow's trigger listening, which
     never finishes; warned about, since waiting for it would never end."""
     if not started.is_trigger_listener:
         return False
+    if not started.workflow_name and isinstance(workflow, Workflow) and workflow.name:
+        # An older Lodol doesn't say the workflow's name when it starts a
+        # run; the workflow in hand does.
+        started = dataclasses.replace(started, workflow_name=workflow.name)
     warn_listening(started, stacklevel=3)
     return True
