@@ -573,14 +573,44 @@ def test_wait_says_what_the_run_is_doing(
 # ── Stopping ─────────────────────────────────────────────────────────────
 
 
-def test_stop(client: Lodol, api: FakeAPI) -> None:
-    api.queue(respond(200, {"execution_id": "683b", "status": "stopping"}))
+def test_stop_returns_the_whole_run(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            200,
+            run_json(
+                status="stopping",
+                version_id="6683",
+                workflow_name="Monthly report",
+                is_trigger_listener=False,
+                created_at="2026-10-13T09:00:00+00:00",
+                started_at="2026-10-13T09:00:01+00:00",
+                completed_at=None,
+                error=None,
+                outputs={},
+                retry_of="682a",
+                retry_options={"from_start": False, "from_failed_step": False},
+            ),
+        )
+    )
 
     run = client.runs.stop("683b")
 
     assert api.sent() == ("POST", "/executions/683b/stop", {})
     assert api.last.headers["Idempotency-Key"].startswith("lodol-run-stop-")
-    assert run.status == "stopping"
+    assert run.status == RunStatus.STOPPING and not run.finished
+    assert (run.workflow_id, run.version_id) == ("665f", "6683")
+    assert run.workflow_name == "Monthly report"
+    assert run.started_at is not None and run.completed_at is None
+    assert run.retry_of == "682a" and run.retry_options == RetryOptions()
+
+
+def test_stop_on_an_older_lodol(client: Lodol, api: FakeAPI) -> None:
+    """Which answered with only the run's id and status."""
+    api.queue(respond(200, {"execution_id": "683b", "status": "stopping"}))
+
+    run = client.runs.stop("683b")
+
+    assert run == Run(id="683b", status="stopping")
 
 
 def test_stopping_a_run_that_already_finished_returns_it(

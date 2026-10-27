@@ -164,8 +164,10 @@ class Runs:
     def stop(self, run: RunRef) -> Run:
         """Stop a run. Steps it already finished aren't undone.
 
-        Returns the run with status ``"stopping"`` or ``"stopped"``, or, if it
-        had already finished, as it finished.
+        Returns the run as ``runs.get`` gives it, with status ``"stopping"``
+        while it finishes the step it is on, or ``"stopped"``; or, if it had
+        already finished, as it finished. Any approval request it was
+        waiting on is withdrawn.
         """
         run_id = object_id(run, Run, "run")
         try:
@@ -325,8 +327,10 @@ class AsyncRuns:
     async def stop(self, run: RunRef) -> Run:
         """Stop a run. Steps it already finished aren't undone.
 
-        Returns the run with status ``"stopping"`` or ``"stopped"``, or, if it
-        had already finished, as it finished.
+        Returns the run as ``runs.get`` gives it, with status ``"stopping"``
+        while it finishes the step it is on, or ``"stopped"``; or, if it had
+        already finished, as it finished. Any approval request it was
+        waiting on is withdrawn.
         """
         run_id = object_id(run, Run, "run")
         try:

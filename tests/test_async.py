@@ -162,9 +162,22 @@ async def test_stop(aclient: AsyncLodol, api: FakeAPI) -> None:
 
 
 async def test_stop_returns_the_stopping_run(aclient: AsyncLodol, api: FakeAPI) -> None:
-    api.queue(respond(200, {"execution_id": "683b", "status": "stopping"}))
+    api.queue(
+        respond(
+            200,
+            run_json(
+                status="stopped",
+                workflow_name="Monthly report",
+                completed_at="2026-10-13T09:00:05+00:00",
+                retry_options={"from_start": False, "from_failed_step": False},
+            ),
+        )
+    )
 
-    assert (await aclient.runs.stop("683b")).status == "stopping"
+    run = await aclient.runs.stop("683b")
+
+    assert run.status == "stopped" and run.workflow_name == "Monthly report"
+    assert run.completed_at is not None and run.retry_options is not None
 
 
 async def test_retry(aclient: AsyncLodol, api: FakeAPI, clock: FakeClock) -> None:

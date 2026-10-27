@@ -154,7 +154,7 @@ def test_a_request_no_longer_pending_says_what_happened_to_it(
         withdrawn_by_stop, withdrawn_by_delete = refusal("a5"), refusal("a4")
         assert withdrawn_by_stop.code == "approval_withdrawn"
         assert withdrawn_by_stop.message == (
-            "This request was withdrawn. The run was stopped."
+            "This request was withdrawn. The run was stopped before anyone answered."
         )
         assert withdrawn_by_delete.code == "approval_withdrawn"
         assert refusal("a3").code == "approval_expired"
@@ -338,6 +338,27 @@ def test_retrying_a_failed_run(server: Server) -> None:
         first = lodol.runs.retry(original, idempotency_key="retry-once")
         second = lodol.runs.retry(original, idempotency_key="retry-once")
         assert first.id == second.id
+
+
+def test_stopping_a_run_returns_all_of_it(server: Server) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        queued = lodol.workflows.run("665f", inputs={"client": "Acme"})
+        on_a_step = lodol.workflows.run("665f", inputs={"client": "Globex"})
+        assert lodol.runs.get(on_a_step).status == "running"
+
+        stopped = lodol.runs.stop(queued)
+        stopping = lodol.runs.stop(on_a_step)
+
+        assert stopped.status == "stopped" and stopped.completed_at is not None
+        assert stopping.status == "stopping" and stopping.completed_at is None
+        for run in (stopped, stopping):
+            assert run.workflow_id == "665f" and run.version_id == "v665f"
+            assert run.workflow_name == "Monthly report"
+            assert run.retry_of is None
+            assert run.retry_options == RetryOptions()
+        assert lodol.runs.get(on_a_step).status == "stopped"
+        # Asked again: returned as it finished.
+        assert lodol.runs.stop(on_a_step).status == "stopped"
 
 
 def test_an_error_names_its_request(server: Server) -> None:

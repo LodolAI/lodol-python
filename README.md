@@ -128,7 +128,7 @@ lodol.runs.stop(run)
 
 `run.workflow_id` is the workflow's `id`. `run.version_id` is the version of the workflow that ran, which changes as the workflow is edited. Times are timezone-aware `datetime`s.
 
-Stopping a run doesn't undo the steps it already finished. If the run had already finished, `stop` returns it as it finished rather than raising.
+Stopping a run doesn't undo the steps it already finished. `stop` returns the run, as `runs.get` would, with status `"stopping"` while it finishes the step it's on, or `"stopped"`. If the run had already finished, `stop` returns it as it finished rather than raising.
 
 ```python
 run = lodol.runs.get("683b...")

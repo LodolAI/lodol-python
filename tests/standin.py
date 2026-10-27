@@ -236,22 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                     state, raw, lambda: self._retry(state, run, raw)
                 )
             if method == "POST" and parts[2:] == ["stop"]:
-                if run["status"] in ("success", "failed", "stopped"):
-                    return self._error(
-                        400,
-                        f"Execution already {run['status']}",
-                        error_code="run_already_finished",
-                    )
-                # A run in progress is asked to stop, and stops just after.
-                run["status"] = "stopped"
-                self._withdraw(
-                    state,
-                    because="The run was stopped.",
-                    execution_id=run["execution_id"],
-                )
-                return self._reply(
-                    200, {"execution_id": run["execution_id"], "status": "stopping"}
-                )
+                return self._idempotent(state, raw, lambda: self._stop(state, run))
             self._advance(state, run)
             body = self._detail(run)
             if query.get("include_step_results") == "true":
@@ -434,6 +419,29 @@ class Handler(BaseHTTPRequestHandler):
         state.runs.insert(0, run)
         state.polls[run_id] = 0
         return run
+
+    def _stop(self, state: StandIn, run: dict[str, Any]) -> tuple[int, Any]:
+        if run["status"] in ("success", "failed", "stopped"):
+            return 400, {
+                "error": f"Execution already {run['status']}",
+                "error_code": "run_already_finished",
+            }
+        # A run on a step is asked to stop, and finishes that step first; one
+        # not on a step (queued, or set aside) stops at once. Here, either
+        # has stopped by the time it's next looked at.
+        on_a_step = run["status"] == "running"
+        run["status"] = "stopped"
+        run["completed_at"] = "2026-10-13T09:00:05+00:00"
+        self._withdraw(
+            state,
+            because="The run was stopped before anyone answered.",
+            execution_id=run["execution_id"],
+        )
+        # The whole run, as reading it gives it.
+        body = self._detail(run)
+        if on_a_step:
+            body.update(status="stopping", completed_at=None)
+        return 200, body
 
     def _retry(
         self, state: StandIn, run: dict[str, Any], raw: bytes
