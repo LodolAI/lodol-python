@@ -169,11 +169,6 @@ class RateLimitError(APIStatusError):
         self.retry_after = retry_after
 
 
-class ConcurrencyLimitError(RateLimitError):
-    """429: the workspace is already running as many runs at once as its plan
-    allows. Wait for one to finish (or stop one), then start another."""
-
-
 class RunLimitError(RateLimitError):
     """429: the workspace has used every run its plan includes this month.
 

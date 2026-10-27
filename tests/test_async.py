@@ -9,12 +9,12 @@ from lodol import (
     APIConnectionError,
     AsyncLodol,
     BadRequestError,
-    ConcurrencyLimitError,
     ConflictError,
     DeletedRun,
     DeletedWorkflow,
     InternalServerError,
     RunFailedError,
+    RunLimitError,
     WaitTimeoutError,
 )
 from tests.conftest import (
@@ -204,9 +204,9 @@ async def test_retries_sleep_without_blocking(
 
 
 async def test_errors_match_the_sync_client(aclient: AsyncLodol, api: FakeAPI) -> None:
-    api.queue(respond(429, {"error": "Too many", "error_code": "concurrency_limit"}))
+    api.queue(respond(429, {"error": "Out of runs", "error_code": "monthly_run_limit"}))
 
-    with pytest.raises(ConcurrencyLimitError):
+    with pytest.raises(RunLimitError):
         await aclient.workflows.run("665f")
 
 

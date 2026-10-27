@@ -58,8 +58,10 @@ class Workflows:
         input refuses the run with ``BadRequestError`` naming the input, and
         nothing runs.
 
-        By default this returns as soon as the run is queued. ``wait=True``
-        returns once it has succeeded, with its step results, and raises
+        By default this returns as soon as the run is queued. A run started
+        while the workspace already has as many going as its plan allows
+        stays ``queued`` until one of them finishes. ``wait=True`` returns
+        once it has succeeded, with its step results, and raises
         ``RunFailedError`` if it fails or is stopped; ``timeout`` then bounds
         the wait in seconds (see ``runs.wait``).
 
@@ -131,8 +133,10 @@ class AsyncWorkflows:
         input refuses the run with ``BadRequestError`` naming the input, and
         nothing runs.
 
-        By default this returns as soon as the run is queued. ``wait=True``
-        returns once it has succeeded, with its step results, and raises
+        By default this returns as soon as the run is queued. A run started
+        while the workspace already has as many going as its plan allows
+        stays ``queued`` until one of them finishes. ``wait=True`` returns
+        once it has succeeded, with its step results, and raises
         ``RunFailedError`` if it fails or is stopped; ``timeout`` then bounds
         the wait in seconds (see ``runs.wait``).
 

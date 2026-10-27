@@ -34,7 +34,6 @@ from lodol.exceptions import (
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
-    ConcurrencyLimitError,
     ConfigurationError,
     ConflictError,
     InternalServerError,
@@ -335,8 +334,8 @@ def retry_delay_after_response(
     if status == 429:
         # Lodol checks its limits before doing anything, so a refused request
         # of any kind can be sent again. It marks the limits that clear by
-        # themselves (requests a minute) with Retry-After; the ones that
-        # don't (runs at once) are the answer.
+        # themselves (requests a minute) with Retry-After; a 429 without one
+        # is the answer.
         return retry_after
     if not request.resendable:
         return None
@@ -471,15 +470,6 @@ def status_error(response: httpx2.Response) -> APIStatusError:
                     body.get("resets_at") if isinstance(body, dict) else None
                 ),
                 limit=limit if isinstance(limit, int) else None,
-                code=code,
-                body=body,
-                response=response,
-            )
-        if code == "concurrency_limit":
-            return ConcurrencyLimitError(
-                message,
-                status_code=status,
-                retry_after=retry_after,
                 code=code,
                 body=body,
                 response=response,

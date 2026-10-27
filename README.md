@@ -43,7 +43,7 @@ run = lodol.workflows.run(workflow, inputs={"client": "Acme", "month": "2026-05"
 print(run.id, run.status)  # "683b...", "queued"
 ```
 
-Without `wait=True`, `run` returns as soon as the run is queued. A workflow's `id` stays the same when it's edited, so it's safe to store.
+Without `wait=True`, `run` returns as soon as the run is queued. A run started while the workspace already has as many going as its plan allows comes back `queued` too, and starts when one of them finishes. A workflow's `id` stays the same when it's edited, so it's safe to store.
 
 **Inputs** are given by name and converted to each input's type, so `"21"` reaches a number input as `21`, and an optional input you leave out takes its default. Dates, times and `Decimal`s are sent as text Lodol reads (`date(2026, 5, 1)` becomes `"2026-05-01"`). An input the workflow doesn't declare, a missing required one, or a value of the wrong type raises `BadRequestError` naming the input, and nothing runs.
 
@@ -151,7 +151,6 @@ When Lodol or the network says no, the SDK raises a `LodolError`. Errors from th
 | `PermissionDeniedError` | The key's scopes, or its creator's role, don't allow this | Give the key the scope, or use another key |
 | `NotFoundError` | No such workflow, run or approval in this workspace | Check the id |
 | `ConflictError` | An approval was already answered; or Lodol was still working on an earlier attempt of a request after five minutes | For an approval, nothing. Otherwise check before trying again: the message has the key to retry with |
-| `ConcurrencyLimitError` | Your plan's runs-at-once limit is reached | Wait for a run to finish, then start another |
 | `RunLimitError` | This month's runs are used up | Runs come back at `error.resets_at` |
 | `RateLimitError` | Too many requests, for longer than the SDK waits on its own | Wait `error.retry_after` seconds |
 | `APIConnectionError`, `APITimeoutError` | Lodol couldn't be reached, didn't answer, or had a certificate that couldn't be verified | Try again later; for a certificate, see the message |

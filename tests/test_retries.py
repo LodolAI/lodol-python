@@ -19,7 +19,6 @@ from lodol import (
     APIResponseValidationError,
     APIStatusError,
     APITimeoutError,
-    ConcurrencyLimitError,
     ConflictError,
     InternalServerError,
     Lodol,
@@ -211,42 +210,25 @@ def test_a_months_runs_used_up_is_reported_not_slept_through(
     assert error.retry_after == 1555200.0
 
 
-def test_too_many_runs_at_once_is_reported_not_retried(
-    client: Lodol, api: FakeAPI
+@pytest.mark.parametrize("code", ["rate_limited", "concurrency_limit", None])
+def test_the_code_decides_not_the_wording(
+    client: Lodol, api: FakeAPI, code: str | None
 ) -> None:
-    api.queue(
-        respond(
-            429,
-            {
-                "error": "Concurrent execution limit reached. Your plan allows 5 "
-                "concurrent executions via the API.",
-                "error_code": "concurrency_limit",
-            },
-        )
-    )
-
-    with pytest.raises(ConcurrencyLimitError) as exc:
-        client.workflows.run("665f")
-
-    assert exc.value.code == "concurrency_limit"
-    assert len(api.requests) == 1
-
-
-def test_the_code_decides_not_the_wording(client: Lodol, api: FakeAPI) -> None:
-    api.queue(
-        respond(
-            429,
-            {
-                "error": "Concurrent execution limit reached.",
-                "error_code": "rate_limited",
-            },
-        )
-    )
+    """Only a month's runs used up is told apart. Any other 429 is a plain
+    RateLimitError, whatever it says, including the "too many runs at once"
+    an older Lodol sent, where Lodol now queues the run instead."""
+    body = {"error": "You've used all 2,000 runs your plan includes this month."}
+    if code is not None:
+        body["error_code"] = code
+    api.queue(respond(429, body))
 
     with pytest.raises(RateLimitError) as exc:
         client.workflows.run("665f")
 
-    assert not isinstance(exc.value, ConcurrencyLimitError)
+    assert type(exc.value) is RateLimitError
+    assert exc.value.code == code
+    # With no Retry-After, it doesn't clear by itself: it's the answer.
+    assert len(api.requests) == 1
 
 
 def test_a_run_still_in_flight_under_its_key_is_waited_for(
