@@ -500,11 +500,36 @@ def test_a_rate_limited_request_of_any_kind_is_retried(
     assert clock.sleeps == [3.0, 3.0]
 
 
-def test_a_key_makes_only_a_post_resendable(client: Lodol, api: FakeAPI) -> None:
+def test_a_key_doesnt_make_a_delete_resendable(client: Lodol, api: FakeAPI) -> None:
+    """Lodol takes keys on POST, PUT and PATCH only."""
     api.queue(respond(500, {"error": "temporary"}))
 
     with pytest.raises(InternalServerError):
         client.request("DELETE", "/workflows/665f", idempotency_key="k1")
+
+    assert len(api.requests) == 1
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH"])
+def test_a_key_makes_a_write_resendable(
+    client: Lodol, api: FakeAPI, clock: FakeClock, method: str
+) -> None:
+    api.queue(respond(500, {"error": "temporary"}), respond(200, {"ok": True}))
+
+    assert client.request(method, "/somewhere", json={}, idempotency_key="k1") == {
+        "ok": True
+    }
+    assert len(api.requests) == 2
+
+
+@pytest.mark.parametrize("method", ["PUT", "PATCH"])
+def test_a_write_without_a_key_still_isnt_resent(
+    client: Lodol, api: FakeAPI, method: str
+) -> None:
+    api.queue(respond(500, {"error": "temporary"}))
+
+    with pytest.raises(InternalServerError):
+        client.request(method, "/workflows/665f", json={})
 
     assert len(api.requests) == 1
 

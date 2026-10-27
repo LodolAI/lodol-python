@@ -47,6 +47,7 @@ from lodol.models import (
     Step,
     StepStatus,
     Workflow,
+    WorkflowCheck,
     WorkflowInput,
     WorkflowOutput,
 )
@@ -90,6 +91,7 @@ __all__ = [
     "UnprocessableEntityError",
     "WaitTimeoutError",
     "Workflow",
+    "WorkflowCheck",
     "WorkflowInput",
     "WorkflowOutput",
     "__version__",

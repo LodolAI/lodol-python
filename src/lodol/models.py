@@ -130,6 +130,11 @@ class Workflow:
 
     ``id`` stays the same when the workflow is edited, so it is safe to store
     and run later. A draft (``is_draft``) can't be run until it is published.
+
+    A workflow just saved (by ``workflows.create``, ``update`` or ``edit``)
+    also says which version the save made, where to open it, and what it
+    still needs; a workflow looked up or listed has ``None`` for those. A
+    note on anything Lodol filled in as it saved is in ``raw["note"]``.
     """
 
     id: str
@@ -148,8 +153,20 @@ class Workflow:
     updated_at: dt.datetime | None = None
     last_run_at: dt.datetime | None = None
     program: dict[str, Any] | None = field(default=None, repr=False, hash=False)
-    """The workflow's steps, as Lodol stores them. Only ``workflows.get``
-    includes it."""
+    """The workflow's steps, as Lodol stores them. ``workflows.get`` and a
+    save include it; ``workflows.list`` doesn't."""
+    version_id: str | None = None
+    """The version a save made, as ``Run.version_id`` names the version
+    that ran. Only a save says."""
+    url: str | None = None
+    """Where to open it in Lodol. Only a save says."""
+    apps_to_connect: list[str] | None = field(default=None, hash=False)
+    """The apps it uses that the key's member has yet to connect in Lodol,
+    which it can't run without. Only a save says."""
+    trigger_paused: bool | None = None
+    """Whether saving the change paused its trigger: it was listening, and
+    listens again, on the new version, once it is run. Only ``update`` and
+    ``edit`` say."""
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -158,6 +175,8 @@ class Workflow:
         program = raw.get("program")
         inputs = raw.get("inputs")
         outputs = raw.get("outputs")
+        apps = raw.get("apps_to_connect")
+        trigger_paused = raw.get("trigger_paused")
         return cls(
             id=str(raw.get("id") or ""),
             name=str(raw.get("name") or ""),
@@ -181,6 +200,55 @@ class Workflow:
             updated_at=parse_datetime(raw.get("updated_at")),
             last_run_at=parse_datetime(raw.get("last_run_at")),
             program=program if isinstance(program, dict) else None,
+            version_id=_optional_str(raw.get("version_id")),
+            url=_optional_str(raw.get("url")),
+            apps_to_connect=(
+                [str(app) for app in apps] if isinstance(apps, list) else None
+            ),
+            trigger_paused=(
+                trigger_paused if isinstance(trigger_paused, bool) else None
+            ),
+            raw=raw,
+        )
+
+
+@dataclass(frozen=True)
+class WorkflowCheck:
+    """What ``workflows.validate`` made of a program: whether Lodol could
+    save it, and if not, what to fix (``error``).
+
+    ``raw`` has the rest of what Lodol said about a valid one: a dry run of
+    it against mocked apps (``raw["preview"]``), its steps described
+    (``raw["steps"]``), and a note on anything it would fill in as it saved
+    it (``raw["note"]``).
+    """
+
+    valid: bool
+    error: str | None = None
+    """What to fix, when it isn't valid."""
+    warnings: dict[str, Any] = field(default_factory=dict, hash=False)
+    """Likely mistakes in a valid program, by kind, such as ``"warning"``
+    for one that would do nothing."""
+    starts_from_trigger: bool = False
+    """Whether it starts from its own trigger or schedule."""
+    actions: list[str] = field(default_factory=list, hash=False)
+    """The actions it calls, by path, such as
+    ``"/actions/library/slack/send-message"``."""
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_api(cls, data: Mapping[str, Any]) -> WorkflowCheck:
+        raw = dict(data)
+        warnings = raw.get("warnings")
+        actions = raw.get("actions")
+        return cls(
+            valid=raw.get("valid") is True,
+            error=_optional_str(raw.get("error")),
+            warnings=dict(warnings) if isinstance(warnings, Mapping) else {},
+            starts_from_trigger=bool(raw.get("has_trigger")),
+            actions=(
+                [str(action) for action in actions] if isinstance(actions, list) else []
+            ),
             raw=raw,
         )
 

@@ -69,6 +69,8 @@ def monotonic() -> float:
 # ── Requests and responses ──────────────────────────────────────────────
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# The writes the API takes an Idempotency-Key on.
+_KEYED_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
 QueryParams = Mapping[str, str | Sequence[str]]
 
@@ -80,16 +82,18 @@ class APIRequest:
     params: QueryParams | None = None
     body: Any = None
     idempotency_key: str | None = None
+    read_only: bool = False
+    """A POST that only reads, such as checking a workflow's program."""
 
     @property
     def resendable(self) -> bool:
         """Whether sending this again can't make anything happen twice: a
-        read, or a POST the server deduplicates by its Idempotency-Key. (The
-        API takes keys on POSTs only; a key on anything else protects
-        nothing.)"""
-        return self.method in _SAFE_METHODS or (
-            self.method == "POST" and self.idempotency_key is not None
-        )
+        read, or a POST, PUT or PATCH the server deduplicates by its
+        Idempotency-Key. (The API takes keys on those only; a key on a
+        DELETE protects nothing.)"""
+        if self.method in _SAFE_METHODS or self.read_only:
+            return True
+        return self.method in _KEYED_METHODS and self.idempotency_key is not None
 
     def describe(self) -> str:
         return f"{self.method} {self.path}"

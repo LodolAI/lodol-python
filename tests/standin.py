@@ -8,6 +8,7 @@ answer replayed; reused for something else: 422).
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import hashlib
 import itertools
@@ -109,6 +110,19 @@ class StandIn:
         # run and workflow whatever execution_id and workflow_id say.
         self.filters_approvals = True
         self.next_approval_id = 3
+        # What the key may do. Without workflows:write it can't create or
+        # change workflows.
+        self.scopes = {
+            "workflows:read",
+            "workflows:write",
+            "workflows:execute",
+            "workflows:delete",
+            "executions:read",
+            "executions:delete",
+        }
+        # The apps the key's member has connected in Lodol.
+        self.connected_apps = {"slack"}
+        self.next_workflow_id = 1
         self.headers_seen: list[dict[str, str]] = []
         self.slow_seconds = 0.0
         # How long starting a run takes, during which a retry under the same
@@ -180,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
         with state.lock:
             self._route(state, self.command, parts, query, raw)
 
-    do_GET = do_POST = do_DELETE = _handle
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
 
     # ── the API ──
 
@@ -196,14 +210,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(
                 200, {"workflows": [_shown(w) for w in state.workflows.values()]}
             )
+        if method == "POST" and parts == ["workflows", "validate"]:
+            if self._may_write(state):
+                self._reply(*self._validate(raw))
+            return None
+        if method == "POST" and parts == ["workflows"]:
+            if self._may_write(state):
+                self._idempotent(state, raw, lambda: self._create(state, raw))
+            return None
+        if (
+            method in ("PUT", "PATCH")
+            and parts[:1] == ["workflows"]
+            and len(parts) == 2
+        ):
+            if self._may_write(state):
+                self._idempotent(
+                    state, raw, lambda: self._change(state, method, parts[1], raw)
+                )
+            return None
         if parts[:1] == ["workflows"] and len(parts) == 2:
             workflow = state.workflows.get(parts[1])
             if workflow is None:
                 return self._error(404, "Workflow not found")
             if method == "GET":
-                return self._reply(
-                    200, {**_shown(workflow), "program": {"kind": "Program"}}
-                )
+                return self._reply(200, _shown(workflow, program=True))
             del state.workflows[parts[1]]
             self._withdraw(
                 state, because="The workflow was deleted.", workflow_id=parts[1]
@@ -377,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
         started: dict[str, Any] = {
             "execution_id": run["execution_id"],
             "workflow_id": workflow_id,
-            "version_id": "v" + workflow_id,
+            "version_id": run["version_id"],
             "workflow_name": workflow["name"],
             "status": "queued",
             "created_at": "2026-10-13T09:00:00+00:00",
@@ -406,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
         run: dict[str, Any] = {
             "execution_id": run_id,
             "workflow_id": workflow_id,
-            "version_id": "v" + workflow_id,
+            "version_id": workflow.get("version_id", "v" + workflow_id),
             "workflow_name": workflow_name,
             "status": "running" if listening else "queued",
             "created_at": "2026-10-13T09:00:00+00:00",
@@ -452,6 +482,148 @@ class Handler(BaseHTTPRequestHandler):
         state.runs.insert(0, run)
         state.polls[run_id] = 0
         return run
+
+    # ── creating and changing workflows ──
+
+    def _may_write(self, state: StandIn) -> bool:
+        if "workflows:write" in state.scopes:
+            return True
+        self._error(403, "API key lacks required scope(s)", error_code="missing_scope")
+        return False
+
+    @staticmethod
+    def _validate(raw: bytes) -> tuple[int, Any]:
+        try:
+            body = _body(raw, ("program",))
+            program = _program(body.get("program"))
+        except _Refused as refused:
+            return 400, {"error": str(refused)}
+        error = _program_error(program)
+        if error:
+            return 200, {"valid": False, "error": error}
+        steps = [
+            {"index": index, "kind": statement["kind"]}
+            for index, statement in enumerate(program["body"])
+        ]
+        report: dict[str, Any] = {
+            "valid": True,
+            "preview": {"steps": steps, "outputs": {}},
+            "actions": _actions(program),
+            "has_trigger": _starts_from_trigger(program),
+            "steps": steps,
+        }
+        if not report["actions"] and not report["has_trigger"]:
+            report["warnings"] = {
+                "warning": "This workflow makes no api.request calls and has no "
+                "trigger; if it is meant to perform actions or run automatically "
+                "it is currently a no-op."
+            }
+        return 200, report
+
+    def _create(self, state: StandIn, raw: bytes) -> tuple[int, Any]:
+        try:
+            body = _body(raw, ("name", "description", "program"))
+            name = _name(body.get("name"), required=True)
+            description = _description(body.get("description")) or ""
+            program = _savable(_program(body.get("program")), previous=None)
+        except _Refused as refused:
+            return 400, refused.body
+        workflow_id = f"w{state.next_workflow_id}"
+        state.next_workflow_id += 1
+        workflow: dict[str, Any] = {
+            "id": workflow_id,
+            "name": name,
+            "description": description,
+            "publish_state": "published",
+            "created_by": "u1",
+            "created_at": "2026-10-27T12:00:00+00:00",
+            "updated_at": "2026-10-27T12:00:00+00:00",
+            "last_run_at": None,
+            "inputs": [],
+            "outputs": [],
+            "versions": 1,
+        }
+        _set_program(workflow, program)
+        state.workflows[workflow_id] = workflow
+        return 201, self._saved(state, workflow)
+
+    def _change(
+        self, state: StandIn, method: str, workflow_id: str, raw: bytes
+    ) -> tuple[int, Any]:
+        workflow = state.workflows.get(workflow_id)
+        if workflow is None:
+            return 404, {"error": "Workflow not found"}
+        if workflow.get("view_only"):
+            return 403, {
+                "error": "You have view-only access to this workflow",
+                "error_code": "item_view_only",
+            }
+        previous = workflow.get("program")
+        try:
+            if method == "PUT":
+                body = _body(raw, ("name", "description", "program"))
+                if all(body.get(f) is None for f in ("name", "description", "program")):
+                    raise _Refused(
+                        'Nothing to change: send a new "program", "name" or '
+                        '"description".'
+                    )
+                program = previous
+                if body.get("program") is not None:
+                    program = _savable(_program(body["program"]), previous=previous)
+            else:
+                body = _body(raw, ("operations", "name", "description"))
+                operations = body.get("operations")
+                if not isinstance(operations, list) or not 1 <= len(operations) <= 100:
+                    raise _Refused(
+                        '"operations" must be a list of 1 to 100 JSON Patch '
+                        "operations."
+                    )
+                patched = _patched(previous or _EMPTY_PROGRAM, operations)
+                program = _savable(patched, previous=previous)
+            name = _name(body.get("name"), required=False)
+            description = _description(body.get("description"))
+        except _Refused as refused:
+            return 400, refused.body
+        # Saving pauses the trigger of a workflow that was listening.
+        listening = [
+            run
+            for run in state.runs
+            if run["workflow_id"] == workflow_id
+            and run["listening"]
+            and run["status"] == "running"
+        ]
+        for run in listening:
+            run["status"] = "stopped"
+        workflow["versions"] = workflow.get("versions", 1) + 1
+        workflow["updated_at"] = "2026-10-27T12:30:00+00:00"
+        if name is not None:
+            workflow["name"] = name
+        if description is not None:
+            workflow["description"] = description
+        if program is not None:
+            _set_program(workflow, program)
+        return 200, self._saved(state, workflow, trigger_paused=bool(listening))
+
+    @staticmethod
+    def _saved(
+        state: StandIn, workflow: dict[str, Any], *, trigger_paused: bool | None = None
+    ) -> dict[str, Any]:
+        # As the server answers a save: the workflow as reading it gives it,
+        # and what it needs.
+        wanted = [path.split("/")[3] for path in _actions(workflow.get("program"))]
+        payload = {
+            **_shown(workflow, program=True),
+            "version_id": _version_id(workflow),
+            "url": f"https://app.lodol.com/create?programId={workflow['id']}",
+            "apps_to_connect": [
+                app.capitalize()
+                for app in dict.fromkeys(wanted)
+                if app not in state.connected_apps
+            ],
+        }
+        if trigger_paused is not None:
+            payload["trigger_paused"] = trigger_paused
+        return payload
 
     def _stop(self, state: StandIn, run: dict[str, Any]) -> tuple[int, Any]:
         if run["status"] in ("success", "failed", "stopped"):
@@ -766,14 +938,238 @@ def _run_time(raw: str | None, name: str) -> dt.datetime | None:
     return moment
 
 
-def _shown(workflow: dict[str, Any]) -> dict[str, Any]:
+def _shown(workflow: dict[str, Any], *, program: bool = False) -> dict[str, Any]:
     # A workflow as the workflow endpoints give it, without what only the
-    # stand-in keeps (the questions its runs ask).
-    fields = ("id", "name", "description", "publish_state", "inputs", "outputs")
-    return {
-        **{name: workflow[name] for name in fields if name in workflow},
+    # stand-in keeps (the questions its runs ask, its version count).
+    shown = {
+        "id": workflow["id"],
+        "name": workflow["name"],
+        "description": workflow.get("description", ""),
+        "created_by": workflow.get("created_by"),
+        "created_at": workflow.get("created_at"),
+        "updated_at": workflow.get("updated_at"),
+        "last_run_at": workflow.get("last_run_at"),
+        "publish_state": workflow.get("publish_state", "published"),
         "starts_from_trigger": bool(workflow.get("starts_from_trigger")),
+        "inputs": workflow["inputs"],
+        "outputs": workflow["outputs"],
     }
+    if program:
+        shown["program"] = workflow.get("program") or {"kind": "Program"}
+    return shown
+
+
+def _version_id(workflow: dict[str, Any]) -> str:
+    versions = workflow.get("versions", 1)
+    return f"v{workflow['id']}" + (f".{versions}" if versions > 1 else "")
+
+
+def _set_program(workflow: dict[str, Any], program: dict[str, Any]) -> None:
+    workflow["program"] = program
+    workflow["starts_from_trigger"] = _starts_from_trigger(program)
+    workflow["version_id"] = _version_id(workflow)
+
+
+class _Refused(Exception):
+    """A request that can't be carried out as sent, and why."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.body = {"error": message, **({"error_code": code} if code else {})}
+
+
+_EMPTY_PROGRAM: dict[str, Any] = {"kind": "Program", "version": 1, "body": []}
+
+# The statements a program is made of, as the workflow guide lists them.
+_STATEMENTS = frozenset(
+    {
+        "BlockStmt",
+        "LetStmt",
+        "AssignStmt",
+        "IfStmt",
+        "WhileStmt",
+        "ForOfStmt",
+        "RepeatStmt",
+        "TryStmt",
+        "WhenStmt",
+        "FrequencyStmt",
+        "BreakStmt",
+        "ContinueStmt",
+        "StopStmt",
+        "ExprStmt",
+    }
+)
+
+
+def _body(raw: bytes, allowed: tuple[str, ...]) -> dict[str, Any]:
+    try:
+        body = json.loads(raw) if raw.strip() else None
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise _Refused("The request body must be a JSON object.")
+    unknown = sorted(name for name in body if name not in allowed)
+    if unknown:
+        raise _Refused(
+            f"The request body has unknown field(s): {', '.join(unknown)}. It "
+            f"takes {', '.join(allowed)}."
+        )
+    return body
+
+
+def _program(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _Refused(
+            '"program" must be the workflow\'s Program AST as a JSON object, '
+            'such as {"kind": "Program", "version": 1, "body": [...]}.'
+        )
+    return value
+
+
+def _name(value: Any, *, required: bool) -> str | None:
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise _Refused('"name" must be the workflow\'s name, as text.')
+    if len(value.strip()) > 255:
+        raise _Refused(
+            f'"name" is {len(value.strip()):,} characters; a workflow\'s name may '
+            "be at most 255."
+        )
+    return value.strip()
+
+
+def _description(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _Refused('"description" must be text.')
+    if len(value) > 5000:
+        raise _Refused(
+            f'"description" is {len(value):,} characters; it may be at most 5,000.'
+        )
+    return value.strip()
+
+
+def _program_error(program: dict[str, Any]) -> str | None:
+    # What the stand-in holds a program to: the shape of one, made of
+    # statements it knows.
+    if program.get("kind") != "Program":
+        return 'A program\'s "kind" must be "Program"'
+    body = program.get("body")
+    if not isinstance(body, list):
+        return 'A program\'s "body" must be a list of statements'
+    for index, statement in enumerate(body):
+        if not isinstance(statement, dict) or statement.get("kind") not in _STATEMENTS:
+            return f"Statement {index} of the program isn't a statement"
+    return None
+
+
+def _savable(program: dict[str, Any], *, previous: Any) -> dict[str, Any]:
+    error = _program_error(program)
+    if error:
+        raise _Refused(
+            f"The workflow is invalid and was not saved: {error}. "
+            "POST /api/v1/workflows/validate checks a program without saving it.",
+            code="invalid_workflow",
+        )
+    if isinstance(previous, dict) and previous.get("body") and not program["body"]:
+        raise _Refused(
+            "Refusing to replace this workflow's steps with an empty program. To "
+            'change only its name or description, leave out "program".',
+            code="invalid_workflow",
+        )
+    return program
+
+
+def _nodes(value: Any) -> Iterator[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _nodes(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _nodes(item)
+
+
+def _actions(program: Any) -> list[str]:
+    # The action paths of its api.request calls.
+    paths = []
+    for node in _nodes(program):
+        args = node.get("args")
+        if node.get("kind") == "NativeCallExpr" and node.get("name") == "api.request":
+            if isinstance(args, list) and len(args) > 1 and isinstance(args[1], dict):
+                paths.append(str(args[1].get("value")))
+    return paths
+
+
+def _starts_from_trigger(program: Any) -> bool:
+    # A trigger or schedule can only be its first statement.
+    body = program.get("body") if isinstance(program, dict) else None
+    if not isinstance(body, list) or not body or not isinstance(body[0], dict):
+        return False
+    first = body[0]
+    if first.get("kind") in ("WhenStmt", "FrequencyStmt"):
+        return True
+    init = first.get("init")
+    return (
+        first.get("kind") == "LetStmt"
+        and isinstance(init, dict)
+        and init.get("kind") == "NativeCallExpr"
+        and str(init.get("name", "")).endswith("_trigger")
+    )
+
+
+def _patched(program: dict[str, Any], operations: list[Any]) -> dict[str, Any]:
+    # JSON Patch's replace, add and remove, in order, to a copy.
+    patched = copy.deepcopy(program)
+    for number, operation in enumerate(operations, start=1):
+        try:
+            _apply(patched, operation)
+        except (KeyError, IndexError, ValueError, TypeError):
+            raise _Refused(
+                f"Couldn't apply the patch: operation {number} doesn't fit the "
+                "workflow's program. The workflow is unchanged."
+            ) from None
+    return patched
+
+
+def _apply(document: dict[str, Any], operation: Any) -> None:
+    if not isinstance(operation, dict) or operation.get("op") not in (
+        "replace",
+        "add",
+        "remove",
+    ):
+        raise ValueError(operation)
+    path = operation.get("path")
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError(path)
+    *steps, last = [
+        part.replace("~1", "/").replace("~0", "~") for part in path[1:].split("/")
+    ]
+    parent: Any = document
+    for step in steps:
+        parent = parent[int(step)] if isinstance(parent, list) else parent[step]
+    op = operation["op"]
+    if isinstance(parent, list):
+        if op == "add":
+            index = len(parent) if last == "-" else int(last)
+            if not 0 <= index <= len(parent):
+                raise IndexError(index)
+            parent.insert(index, operation.get("value"))
+        elif op == "remove":
+            del parent[int(last)]
+        else:
+            parent[int(last)] = operation.get("value")
+        return
+    if not isinstance(parent, dict):
+        raise TypeError(path)
+    if op in ("replace", "remove") and last not in parent:
+        raise KeyError(path)
+    if op == "remove":
+        del parent[last]
+    else:
+        parent[last] = operation.get("value")
 
 
 def _started(run: dict[str, Any]) -> dt.datetime:
@@ -790,6 +1186,7 @@ _OUTPUTS: dict[str, dict[str, Any]] = {"665f": {"total": 1250}, "5c3d": {"synced
 _FALLBACK_CODES = {
     400: "invalid_request",
     401: "unauthorized",
+    403: "forbidden",
     404: "not_found",
     409: "conflict",
     422: "unprocessable_request",

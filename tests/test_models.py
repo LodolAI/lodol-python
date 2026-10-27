@@ -23,6 +23,7 @@ from lodol import (
     StepStatus,
     WaitTimeoutError,
     Workflow,
+    WorkflowCheck,
     WorkflowInput,
     WorkflowOutput,
 )
@@ -323,6 +324,38 @@ def test_a_listener_is_marked() -> None:
 
     assert run.is_trigger_listener
     assert not run.finished
+
+
+def test_a_workflow_just_saved_says_what_it_needs() -> None:
+    saved = Workflow.from_api(
+        {
+            "id": "665f",
+            "name": "Say hello",
+            "version_id": "6690",
+            "url": "https://app.lodol.com/create?programId=665f",
+            "apps_to_connect": ["Gmail", "Slack"],
+            "trigger_paused": True,
+        }
+    )
+    looked_up = Workflow.from_api(
+        {"id": "665f", "name": "x", "apps_to_connect": "Gmail", "trigger_paused": 1}
+    )
+
+    assert saved.version_id == "6690"
+    assert saved.url == "https://app.lodol.com/create?programId=665f"
+    assert saved.apps_to_connect == ["Gmail", "Slack"]
+    assert saved.trigger_paused is True
+    assert {saved, saved} == {saved}
+    # What isn't said, or can't be read, is None: not "nothing to connect".
+    assert looked_up.version_id is None and looked_up.url is None
+    assert looked_up.apps_to_connect is None and looked_up.trigger_paused is None
+
+
+def test_a_check_tolerates_a_sparse_answer() -> None:
+    check = WorkflowCheck.from_api({"valid": "yes", "warnings": [], "actions": "x"})
+
+    assert check == WorkflowCheck(valid=False)
+    assert WorkflowCheck.from_api({"valid": True}).valid
 
 
 def test_a_workflow_says_what_it_hands_back() -> None:

@@ -11,6 +11,7 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - **Approvals.** `lodol.approvals` lists the approval requests runs are waiting on, and answers them with `approve`, `reject` or `reply`. `approvals.wait_for(run)` waits until a run asks, pacing itself as `runs.wait` does, and returns the request it's waiting on, and `approvals.list(run=..., workflow=...)` lists one run's or one workflow's. Answering one that's no longer pending raises `ConflictError` with a `code` saying why: `"approval_already_answered"`, `"approval_expired"` or `"approval_withdrawn"`.
 - **Deleting runs.** `runs.delete(run)` removes a finished run, and the runs it started, from the history. It needs a key with the new **Delete runs** scope.
 - **Retrying a failed run.** `runs.retry(run)` runs it again with the data it started with, picking up at the step that failed without running the steps before it again, or, with `from_start=True`, from the top. `run.retry_options` says which retries a run offers, and a retry's `run.retry_of` names the run it retried.
+- **Creating and changing workflows.** `workflows.create` saves a new one, `update` replaces a workflow's steps, name or description, and `edit` changes its steps with JSON Patch operations; `workflows.validate` checks a program without saving it, as a `WorkflowCheck`. A save says where to open the workflow (`url`), the version it made (`version_id`), the apps still to connect (`apps_to_connect`) and whether it paused a listening trigger (`trigger_paused`). They need a key with the **Create and edit workflows** scope, which is ticked by default.
 - **Lists you just loop over.** `runs.list()` and `approvals.list()` fetch pages as you go, newest first; `limit=` stops early.
 - **Finding runs.** `runs.list()` narrows to runs in a status or several (`status=`), that started in a time range (`started_from=`, `started_to=`), or whose workflow's name or data matches (`search=`). A status runs can't be listed by raises `ValueError` before anything is sent, since Lodol would ignore it and list every run.
 - **Lodol Local**, and any other address: `base_url=` or `LODOL_BASE_URL`.
@@ -24,7 +25,7 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - Models can be hashed, and errors can be pickled, so both cross process boundaries (multiprocessing, task queues).
 - `LODOL_LOG=info` or `LODOL_LOG=debug` turns on logging.
 
-0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener`, `starts_from_trigger`, `retry_options` and `request_id` the SDK relies on, retries runs, filters runs by status, start time and search, lists one run's or one workflow's approval requests, and says why one can't be answered. Update an older Lodol Local before upgrading.
+0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener`, `starts_from_trigger`, `retry_options` and `request_id` the SDK relies on, retries runs, filters runs by status, start time and search, lists one run's or one workflow's approval requests, says why one can't be answered, and creates and changes workflows. Update an older Lodol Local before upgrading.
 
 ### Fixed
 

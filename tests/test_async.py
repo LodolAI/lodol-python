@@ -49,6 +49,51 @@ async def test_workflows(aclient: AsyncLodol, api: FakeAPI) -> None:
     assert [api.sent(i)[0] for i in range(3)] == ["GET", "GET", "DELETE"]
 
 
+async def test_creating_and_changing_workflows(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    program = {"kind": "Program", "version": 1, "body": []}
+    saved = workflow_json(program=program, version_id="6690", apps_to_connect=[])
+    api.queue(
+        respond(200, {"valid": True, "actions": [], "has_trigger": False}),
+        respond(201, saved),
+        respond(200, {**saved, "name": "Renamed", "trigger_paused": False}),
+        respond(200, {**saved, "trigger_paused": True}),
+    )
+
+    check = await aclient.workflows.validate(program)
+    created = await aclient.workflows.create("Monthly report", program)
+    renamed = await aclient.workflows.update(created, name="Renamed")
+    edited = await aclient.workflows.edit(
+        created, [{"op": "add", "path": "/body/-", "value": {}}]
+    )
+
+    assert check.valid and created.version_id == "6690"
+    assert renamed.name == "Renamed" and edited.trigger_paused is True
+    assert [api.sent(i)[:2] for i in range(4)] == [
+        ("POST", "/workflows/validate"),
+        ("POST", "/workflows"),
+        ("PUT", "/workflows/665f"),
+        ("PATCH", "/workflows/665f"),
+    ]
+    assert api.body(3) == {
+        "operations": [{"op": "add", "path": "/body/-", "value": {}}]
+    }
+    keys = [api.requests[i].headers.get("Idempotency-Key", "") for i in range(4)]
+    assert keys[0] == "" and all(key.startswith("lodol-workflow-") for key in keys[1:])
+
+
+async def test_a_save_is_checked_before_anything_is_sent(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    with pytest.raises(ValueError, match="Nothing to change"):
+        await aclient.workflows.update("665f")
+    with pytest.raises(ValueError, match="operations is empty"):
+        await aclient.workflows.edit("665f", [])
+
+    assert api.requests == []
+
+
 async def test_run_and_wait(
     aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
 ) -> None:

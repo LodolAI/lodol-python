@@ -17,6 +17,7 @@ from lodol import (
     ConflictError,
     Lodol,
     NotFoundError,
+    PermissionDeniedError,
     RetryOptions,
     RunFailedError,
     RunStatus,
@@ -212,6 +213,122 @@ def test_waiting_for_an_approval_on_an_older_lodol(server: Server) -> None:
         assert [a.run_id for a in lodol.approvals.list(run=run)] == [run.id]
         # A workflow can't be told apart: every pending request is listed.
         assert len(list(lodol.approvals.list(workflow="4e8d"))) == 3
+
+
+def display(text: str) -> dict[str, Any]:
+    return {
+        "kind": "ExprStmt",
+        "expr": {"kind": "DisplayBuiltIn", "value": {"kind": "Literal", "value": text}},
+    }
+
+
+def send_email() -> dict[str, Any]:
+    return {
+        "kind": "ExprStmt",
+        "expr": {
+            "kind": "NativeCallExpr",
+            "name": "api.request",
+            "args": [
+                {"kind": "Literal", "value": "POST"},
+                {"kind": "Literal", "value": "/actions/library/gmail/send-email"},
+                {"kind": "Literal", "value": {"to": "kim@acme.test"}},
+            ],
+        },
+    }
+
+
+def test_creating_and_changing_a_workflow(server: Server) -> None:
+    program = {"kind": "Program", "version": 1, "body": [display("Hello")]}
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        check = lodol.workflows.validate(program)
+        assert check.valid and "warning" in check.warnings
+        broken = lodol.workflows.validate({"kind": "Program", "body": [{}]})
+        assert not broken.valid and broken.error is not None
+
+        created = lodol.workflows.create("Say hello", program, description="Hi")
+        assert created.program == program and created.description == "Hi"
+        assert created.url is not None and created.url.endswith(created.id)
+        assert created.version_id == f"v{created.id}"
+        assert created.apps_to_connect == [] and created.trigger_paused is None
+        assert lodol.workflows.get(created).name == "Say hello"
+        assert lodol.workflows.run(created, wait=True, timeout=10).succeeded
+
+        edited = lodol.workflows.edit(
+            created,
+            [
+                {"op": "replace", "path": "/body/0/expr/value/value", "value": "Hi"},
+                {"op": "add", "path": "/body/-", "value": send_email()},
+            ],
+        )
+        assert edited.program is not None
+        assert edited.program["body"][0] == display("Hi")
+        assert edited.version_id == f"v{created.id}.2"
+        assert edited.apps_to_connect == ["Gmail"]
+        assert edited.trigger_paused is False
+        assert lodol.workflows.update(edited, name="Say hi").name == "Say hi"
+        assert lodol.workflows.get(created).program == edited.program
+
+        with pytest.raises(BadRequestError) as invalid:
+            lodol.workflows.update(created, program={"kind": "Program", "body": [{}]})
+        assert invalid.value.code == "invalid_workflow"
+        with pytest.raises(BadRequestError, match="with an empty program") as empty:
+            lodol.workflows.update(created, program={"kind": "Program", "body": []})
+        assert empty.value.code == "invalid_workflow"
+        with pytest.raises(BadRequestError, match="Couldn't apply the patch") as bad:
+            lodol.workflows.edit(created, [{"op": "remove", "path": "/body/9"}])
+        assert bad.value.code == "invalid_request"
+        # Nothing refused changed anything.
+        assert lodol.workflows.get(created).program == edited.program
+
+
+def test_a_saved_workflow_that_was_listening(server: Server) -> None:
+    trigger = {
+        "kind": "LetStmt",
+        "name": "invoice",
+        "init": {"kind": "NativeCallExpr", "name": "new_invoice_trigger", "args": []},
+    }
+    program = {"kind": "Program", "version": 1, "body": [trigger, display("Got one")]}
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        workflow = lodol.workflows.create("New invoices", program)
+        assert workflow.starts_from_trigger
+        with pytest.warns(UserWarning, match="'New invoices' starts from its own"):
+            listening = lodol.workflows.run(workflow, wait=True)
+
+        saved = lodol.workflows.update(workflow, description="Each new invoice")
+
+        assert saved.trigger_paused is True
+        assert lodol.runs.get(listening).status == "stopped"
+        # Not listening any more, so nothing left to pause.
+        assert lodol.workflows.update(workflow, name="Invoices").trigger_paused is False
+
+
+def test_a_workflow_the_key_may_not_change(server: Server) -> None:
+    program = {"kind": "Program", "version": 1, "body": [display("Hello")]}
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        server.state.workflows["665f"]["view_only"] = True
+        with pytest.raises(PermissionDeniedError) as view_only:
+            lodol.workflows.update("665f", name="Mine now")
+        assert view_only.value.code == "item_view_only"
+        with pytest.raises(NotFoundError):
+            lodol.workflows.edit("nope", [{"op": "remove", "path": "/body/0"}])
+
+        server.state.scopes.discard("workflows:write")
+        with pytest.raises(PermissionDeniedError) as missing:
+            lodol.workflows.validate(program)
+        assert missing.value.code == "missing_scope"
+        with pytest.raises(PermissionDeniedError):
+            lodol.workflows.create("Say hello", program)
+
+
+def test_a_slow_save_is_waited_for_not_repeated(server: Server) -> None:
+    server.state.start_seconds = 1.5
+    server.state.in_flight_retry_after = "0.2"
+    program = {"kind": "Program", "version": 1, "body": [display("Hello")]}
+    with Lodol(api_key=KEY, base_url=address(server), timeout=0.5) as lodol:
+        created = lodol.workflows.create("Say hello", program)
+
+    assert created.id == "w1"
+    assert [w for w in server.state.workflows if w.startswith("w")] == ["w1"]
 
 
 def test_your_own_key_starts_a_run_once(server: Server) -> None:

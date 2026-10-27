@@ -5,7 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import decimal
 import uuid
+from collections.abc import Callable
 
+import httpx2
 import pytest
 
 from lodol import (
@@ -17,6 +19,7 @@ from lodol import (
     PermissionDeniedError,
     Run,
     Workflow,
+    WorkflowCheck,
     WorkflowInput,
 )
 from tests.conftest import FakeAPI, FakeClock, respond, run_json, workflow_json
@@ -398,3 +401,279 @@ def test_a_workflow_that_starts_itself_isnt_waited_for(
 
     assert run.status == "running"
     assert len(api.requests) == 1
+
+
+# ── Creating and changing workflows ──────────────────────────────────────
+
+SAY_HELLO = {
+    "kind": "Program",
+    "version": 1,
+    "body": [
+        {
+            "kind": "ExprStmt",
+            "expr": {
+                "kind": "DisplayBuiltIn",
+                "value": {"kind": "Literal", "value": "Hello"},
+            },
+        }
+    ],
+}
+
+
+def saved_json(**fields: object) -> dict[str, object]:
+    # As a save answers: the workflow as reading it gives it, and more.
+    saved: dict[str, object] = {
+        "name": "Say hello",
+        "description": "",
+        "program": SAY_HELLO,
+        "publish_state": "published",
+        "starts_from_trigger": False,
+        "inputs": [],
+        "outputs": [],
+        "version_id": "6690",
+        "url": "https://app.lodol.com/create?programId=665f",
+        "apps_to_connect": [],
+    }
+    return workflow_json(**{**saved, **fields})
+
+
+def test_validate(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            200,
+            {
+                "valid": True,
+                "preview": {"steps": [{"index": 0}]},
+                "actions": ["/actions/library/slack/send-message"],
+                "has_trigger": True,
+                "steps": [{"index": 0, "summary": "Show Hello"}],
+                "warnings": {"missing_start": "It never starts."},
+            },
+        )
+    )
+
+    check = client.workflows.validate(SAY_HELLO)
+
+    assert api.sent() == ("POST", "/workflows/validate", {})
+    assert api.body() == {"program": SAY_HELLO}
+    # It saves nothing, so it needs no key.
+    assert "Idempotency-Key" not in api.last.headers
+    assert check == WorkflowCheck(
+        valid=True,
+        warnings={"missing_start": "It never starts."},
+        starts_from_trigger=True,
+        actions=["/actions/library/slack/send-message"],
+    )
+    assert check.raw["preview"] == {"steps": [{"index": 0}]}
+
+
+def test_validate_a_program_that_cant_be_saved(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"valid": False, "error": "Step 1 has no action."}))
+
+    check = client.workflows.validate({"kind": "Program", "body": [{}]})
+
+    assert not check.valid and check.error == "Step 1 has no action."
+    assert check.warnings == {} and check.actions == []
+
+
+def test_validate_is_sent_again_after_passing_trouble(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    """It changes nothing, so it's sent again as a read would be."""
+    api.queue(
+        httpx2.ReadTimeout("slow"),
+        respond(502),
+        respond(200, {"valid": False, "error": "x"}),
+    )
+
+    assert not client.workflows.validate(SAY_HELLO).valid
+    assert len(api.requests) == 3
+
+
+def test_create(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(201, saved_json(apps_to_connect=["Gmail"], note="Filled in")))
+
+    workflow = client.workflows.create(
+        "Say hello", SAY_HELLO, description="A first workflow"
+    )
+
+    assert api.sent() == ("POST", "/workflows", {})
+    assert api.body() == {
+        "name": "Say hello",
+        "description": "A first workflow",
+        "program": SAY_HELLO,
+    }
+    assert api.last.headers["Idempotency-Key"].startswith("lodol-workflow-create-")
+    assert workflow.id == "665f" and workflow.program == SAY_HELLO
+    assert workflow.version_id == "6690"
+    assert workflow.url == "https://app.lodol.com/create?programId=665f"
+    assert workflow.apps_to_connect == ["Gmail"]
+    # Only an edit says whether it paused a trigger.
+    assert workflow.trigger_paused is None
+    assert workflow.raw["note"] == "Filled in"
+
+
+def test_a_create_is_sent_again_with_the_same_key(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(httpx2.ReadTimeout("slow"), respond(201, saved_json()))
+
+    client.workflows.create("Say hello", SAY_HELLO)
+
+    first, second = api.requests
+    assert first.headers["Idempotency-Key"] == second.headers["Idempotency-Key"]
+    assert first.content == second.content
+
+
+def test_a_program_lodol_cant_save_is_refused(client: Lodol, api: FakeAPI) -> None:
+    message = (
+        "The workflow is invalid and was not saved: Step 1 has no action. POST "
+        "/api/v1/workflows/validate checks a program without saving it."
+    )
+    api.queue(respond(400, {"error": message, "error_code": "invalid_workflow"}))
+
+    with pytest.raises(BadRequestError) as exc:
+        client.workflows.create("Say hello", SAY_HELLO)
+
+    assert exc.value.code == "invalid_workflow"
+    assert str(exc.value) == message
+    assert len(api.requests) == 1
+
+
+def test_update_sends_only_what_changes(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(200, saved_json(name="Say hi", trigger_paused=False)),
+        respond(200, saved_json(trigger_paused=True)),
+    )
+
+    renamed = client.workflows.update(Workflow(id="665f", name="x"), name="Say hi")
+    replaced = client.workflows.update(
+        "665f", program=SAY_HELLO, description="Says hello"
+    )
+
+    assert api.sent(0) == ("PUT", "/workflows/665f", {})
+    assert api.body(0) == {"name": "Say hi"}
+    assert api.body(1) == {"program": SAY_HELLO, "description": "Says hello"}
+    assert (
+        api.requests[0].headers["Idempotency-Key"].startswith("lodol-workflow-update-")
+    )
+    assert renamed.name == "Say hi" and renamed.trigger_paused is False
+    assert replaced.trigger_paused is True
+
+
+def test_update_with_nothing_to_change_is_refused(client: Lodol, api: FakeAPI) -> None:
+    with pytest.raises(ValueError, match="Nothing to change"):
+        client.workflows.update("665f")
+
+    assert api.requests == []
+
+
+def test_edit(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, saved_json(name="Say hello again", trigger_paused=False)))
+    operations = [
+        {"op": "replace", "path": "/body/0/expr/value/value", "value": "Hi"},
+        {"op": "remove", "path": "/body/1"},
+    ]
+
+    workflow = client.workflows.edit("665f", operations, name="Say hello again")
+
+    assert api.sent() == ("PATCH", "/workflows/665f", {})
+    assert api.body() == {"operations": operations, "name": "Say hello again"}
+    assert api.last.headers["Idempotency-Key"].startswith("lodol-workflow-edit-")
+    assert workflow.name == "Say hello again"
+
+
+@pytest.mark.parametrize("method", ["PUT", "PATCH"])
+def test_a_change_is_sent_again_with_the_same_key(
+    client: Lodol, api: FakeAPI, clock: FakeClock, method: str
+) -> None:
+    """Lodol takes a key on these, so a retry can't save twice."""
+    api.queue(respond(503), respond(200, saved_json()))
+
+    if method == "PUT":
+        client.workflows.update("665f", name="Say hello")
+    else:
+        client.workflows.edit("665f", [{"op": "remove", "path": "/body/1"}])
+
+    first, second = api.requests
+    assert first.method == second.method == method
+    assert first.headers["Idempotency-Key"] == second.headers["Idempotency-Key"]
+
+
+@pytest.mark.parametrize(
+    ("call", "error", "complaint"),
+    [
+        (
+            lambda c: c.workflows.validate([SAY_HELLO]),
+            TypeError,
+            r"program must be a dict .*, not list",
+        ),
+        (
+            lambda c: c.workflows.create("Say hello", "steps"),
+            TypeError,
+            "program must be a dict",
+        ),
+        (lambda c: c.workflows.create(42, SAY_HELLO), TypeError, "name must be text"),
+        (lambda c: c.workflows.create("  ", SAY_HELLO), ValueError, "name is empty"),
+        (
+            lambda c: c.workflows.create("x", SAY_HELLO, description=None),
+            TypeError,
+            "description must be text, not NoneType",
+        ),
+        (
+            lambda c: c.workflows.update("665f", program=[SAY_HELLO]),
+            TypeError,
+            "program must be a dict",
+        ),
+        (
+            lambda c: c.workflows.update(Run(id="r", status="x"), name="x"),
+            TypeError,
+            "Expected a workflow id or a Workflow, not Run",
+        ),
+        (
+            lambda c: c.workflows.edit("665f", {"op": "remove", "path": "/body/0"}),
+            TypeError,
+            "operations must be a list of JSON Patch operations, not dict",
+        ),
+        (lambda c: c.workflows.edit("665f", []), ValueError, "operations is empty"),
+        (
+            lambda c: c.workflows.edit("665f", [{"op": "remove"}, "/body/0"]),
+            TypeError,
+            r"operations\[1\] must be a dict",
+        ),
+        (
+            lambda c: c.workflows.edit("665f", [{"op": "remove"}], name=""),
+            ValueError,
+            "name is empty",
+        ),
+    ],
+)
+def test_a_save_is_checked_before_anything_is_sent(
+    client: Lodol,
+    api: FakeAPI,
+    call: Callable[[Lodol], object],
+    error: type[Exception],
+    complaint: str,
+) -> None:
+    with pytest.raises(error, match=complaint):
+        call(client)
+
+    assert api.requests == []
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("API key lacks required scope(s)", "missing_scope"),
+        ("You have view-only access to this workflow", "item_view_only"),
+    ],
+)
+def test_a_key_that_may_not_change_it(
+    client: Lodol, api: FakeAPI, message: str, code: str
+) -> None:
+    api.queue(respond(403, {"error": message, "error_code": code}))
+
+    with pytest.raises(PermissionDeniedError) as exc:
+        client.workflows.update("665f", name="x")
+
+    assert exc.value.code == code and str(exc.value) == message

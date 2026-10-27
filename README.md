@@ -186,6 +186,43 @@ Deleting removes the workflow and every version of it, as deleting it in Lodol d
 
 A delete is never sent twice. If it times out, check with `lodol.workflows.get(...)` before trying again, since it may have happened.
 
+## Create and change workflows
+
+```python
+program = {
+    "kind": "Program",
+    "version": 1,
+    "body": [
+        {
+            "kind": "ExprStmt",
+            "expr": {
+                "kind": "DisplayBuiltIn",
+                "value": {"kind": "Literal", "value": "Hello from Lodol"},
+            },
+        }
+    ],
+}
+
+check = lodol.workflows.validate(program)  # saves nothing
+if not check.valid:
+    raise ValueError(check.error)
+
+workflow = lodol.workflows.create("Say hello", program, description="A first workflow")
+print(workflow.url)  # where to open it in Lodol
+
+workflow = lodol.workflows.edit(
+    workflow,
+    [{"op": "replace", "path": "/body/0/expr/value/value", "value": "Hello again"}],
+)
+workflow = lodol.workflows.update(workflow, name="Say hello again")
+```
+
+A workflow's steps are its `program`, the same structure `workflows.get(...).program` gives you. `validate` checks one without saving it: `check.error` says what to fix, and for a program Lodol could save, `check.warnings` names likely mistakes. `create` saves a new workflow, published, and private to the key's member until they share it in Lodol. It doesn't run it. A program Lodol can't save raises `BadRequestError` with `code` `"invalid_workflow"`, and nothing is saved.
+
+`update` replaces a workflow's `program`, `name` or `description`, leaving the rest as it is, and `edit` changes its program with JSON Patch operations (`"replace"`, `"add"` or `"remove"`), applied in order to the program as it is now. Each saves a new version, `workflow.version_id`. Saving pauses the trigger of a workflow that was listening, and `workflow.trigger_paused` says so: run it again to set it listening on the new version. After any save, `workflow.apps_to_connect` names the apps it uses that the key's member has yet to connect in Lodol, which it can't run without.
+
+These need a key with the **Create and edit workflows** scope (`workflows:write`), which is ticked by default, made by a member allowed to create or edit workflows. A save is never made twice: a retried request gets back the workflow the first one saved.
+
 ## Errors
 
 When Lodol or the network says no, the SDK raises a `LodolError`. Errors from the API carry Lodol's own explanation as their message, and `code`, a stable name for what went wrong (such as `"run_already_finished"`): decide what to do from `code`, since the wording may change. `request_id` names the request; it's also in the error's text, so quote that when you contact Lodol's support. A call that can't be made as written (inputs that aren't a dict, a timeout that isn't a number) raises `TypeError` or `ValueError` before anything is sent.
@@ -205,8 +242,8 @@ When Lodol or the network says no, the SDK raises a `LodolError`. Errors from th
 
 ## What happens automatically
 
-- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads; runs, run retries, stops and approval answers, which carry an idempotency key; and anything a rate limit refused, since Lodol refuses before doing anything. A delete that fails otherwise, and limits that last longer, are reported at once.
-- **Idempotency keys.** Every run, run retry, stop and approval answer gets one, so a retry can never start a second run or answer twice. If a retry finds Lodol still working on the first attempt, it waits for that, up to five minutes, rather than starting again.
+- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads, and checking a workflow; runs, run retries, stops, approval answers and workflow saves, which carry an idempotency key; and anything a rate limit refused, since Lodol refuses before doing anything. A delete that fails otherwise, and limits that last longer, are reported at once.
+- **Idempotency keys.** Every run, run retry, stop, approval answer and workflow save gets one, so a retry can never start a second run, answer twice or save twice. If a retry finds Lodol still working on the first attempt, it waits for that, up to five minutes, rather than starting again.
 - **Timeouts.** Each request may take 30 seconds (`timeout`). Waiting for a run has its own `timeout`.
 - **Security.** Your key is only sent over HTTPS, except to Lodol Local on your own machine, which is reached directly, never through a proxy. It never appears in logs or reprs.
 
