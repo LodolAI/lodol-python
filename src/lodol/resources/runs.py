@@ -6,7 +6,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import warnings
-from typing import TYPE_CHECKING, Iterable
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Generic, Iterable, TypeVar
 
 from lodol import _transport, constants
 from lodol._transport import (
@@ -40,6 +41,8 @@ RunRef = str | Run
 WorkflowRef = str | Workflow
 # A list's query, beside its page size and cursor.
 Filters = dict[str, str | list[str]]
+# What a wait ends with.
+T = TypeVar("T")
 
 logger = logging.getLogger("lodol")
 
@@ -113,7 +116,7 @@ class Runs:
         """A run as it is now. ``include_steps`` adds what each step did."""
         run_id = object_id(run, Run, "run")
         response = self._client._send(_get_request(run_id, include_steps))
-        return _parse_run(response)
+        return parse_run(response)
 
     def wait(
         self,
@@ -136,30 +139,8 @@ class Runs:
         """
         run_id = object_id(run, Run, "run")
         known = run if isinstance(run, Run) else None
-        waiting = _Waiting(self._client, run_id, timeout, known, include_steps)
-        delay = waiting.first_delay()
-        while True:
-            if delay:
-                _transport.sleep(delay)
-            try:
-                response = self._client._send(
-                    _get_request(run_id, waiting.fetching_steps),
-                    max_retries=0,
-                    timeout=waiting.check_timeout(),
-                )
-                current = _parse_run(response)
-            except _PASSING_TROUBLE as exc:
-                next_delay = waiting.failed(exc)
-                if next_delay is None:
-                    if waiting.finished is None:
-                        raise
-                    return waiting.without_steps()
-                delay = next_delay
-            else:
-                next_delay = waiting.checked(current)
-                if next_delay is None:
-                    return waiting.result()
-                delay = next_delay
+        waiting = WaitingForRun(self._client, run_id, timeout, known, include_steps)
+        return poll(self._client, waiting)
 
     def stop(self, run: RunRef) -> Run:
         """Stop a run. Steps it already finished aren't undone.
@@ -176,7 +157,7 @@ class Runs:
             if not _already_finished(exc):
                 raise
             return self.get(run_id)
-        return _parse_run(response)
+        return parse_run(response)
 
     def delete(self, run: RunRef) -> DeletedRun:
         """Delete a finished run, and the runs it started. This can't be undone.
@@ -276,7 +257,7 @@ class AsyncRuns:
         """A run as it is now. ``include_steps`` adds what each step did."""
         run_id = object_id(run, Run, "run")
         response = await self._client._send(_get_request(run_id, include_steps))
-        return _parse_run(response)
+        return parse_run(response)
 
     async def wait(
         self,
@@ -299,30 +280,8 @@ class AsyncRuns:
         """
         run_id = object_id(run, Run, "run")
         known = run if isinstance(run, Run) else None
-        waiting = _Waiting(self._client, run_id, timeout, known, include_steps)
-        delay = waiting.first_delay()
-        while True:
-            if delay:
-                await _transport.async_sleep(delay)
-            try:
-                response = await self._client._send(
-                    _get_request(run_id, waiting.fetching_steps),
-                    max_retries=0,
-                    timeout=waiting.check_timeout(),
-                )
-                current = _parse_run(response)
-            except _PASSING_TROUBLE as exc:
-                next_delay = waiting.failed(exc)
-                if next_delay is None:
-                    if waiting.finished is None:
-                        raise
-                    return waiting.without_steps()
-                delay = next_delay
-            else:
-                next_delay = waiting.checked(current)
-                if next_delay is None:
-                    return waiting.result()
-                delay = next_delay
+        waiting = WaitingForRun(self._client, run_id, timeout, known, include_steps)
+        return await apoll(self._client, waiting)
 
     async def stop(self, run: RunRef) -> Run:
         """Stop a run. Steps it already finished aren't undone.
@@ -339,7 +298,7 @@ class AsyncRuns:
             if not _already_finished(exc):
                 raise
             return await self.get(run_id)
-        return _parse_run(response)
+        return parse_run(response)
 
     async def delete(self, run: RunRef) -> DeletedRun:
         """Delete a finished run, and the runs it started. This can't be undone.
@@ -389,14 +348,17 @@ class AsyncRuns:
         return await self.wait(retry, timeout=timeout)
 
 
-class _Waiting:
-    """What waiting for one run decides: when to check next, what to ask
-    for, and when to stop. The sync and async waits only do what it says.
+class Waiting(ABC, Generic[T]):
+    """What waiting on one run decides: what to ask Lodol for next, when,
+    and when to stop. The sync and async loops (``poll`` and ``apoll``) only
+    do what it says, so every wait paces itself, rides out passing trouble
+    and keeps to its deadline the same way.
 
-    A wait has two stages: checking, lightly, until the run has finished;
-    then, when step results are wanted, fetching them once. The deadline
-    bounds the first. The second only adds the steps to an outcome already
-    known, so when it can't, the outcome is returned without them.
+    A wait checks on the run, lightly, until it has finished; then, when
+    step results are wanted, fetches them once. The deadline bounds the
+    first stage. The second only adds the steps to an outcome already known,
+    so when it can't, the outcome is returned without them. What the wait
+    ends with, and whether it ends sooner, is up to each kind of wait.
     """
 
     def __init__(
@@ -442,9 +404,25 @@ class _Waiting:
         remaining = self._deadline - _transport.monotonic()
         return min(timeout, max(remaining, constants.MIN_CHECK_TIMEOUT))
 
-    def checked(self, run: Run) -> float | None:
+    def next_request(self) -> APIRequest:
+        """What the next check asks Lodol for."""
+        return _get_request(self.run_id, self.fetching_steps)
+
+    def checked(self, response: APIResponse) -> float | None:
         """After a check that worked: seconds until the next one, or
         ``None`` when the wait is over (``result()`` has the answer)."""
+        return self._checked_run(parse_run(response))
+
+    @abstractmethod
+    def result(self) -> T:
+        """What the wait ends with, or why not, raised."""
+
+    @abstractmethod
+    def without_steps(self) -> T:
+        """What the wait ends with when the finished run's step results
+        can't be fetched."""
+
+    def _checked_run(self, run: Run) -> float | None:
         self._failing_since = None
         if self.finished is not None:
             self.latest = run if run.finished else self.finished
@@ -452,10 +430,12 @@ class _Waiting:
         self.latest = run
         self._looked = True
         if run.is_trigger_listener and not run.finished:
-            warn_listening(run, stacklevel=3)
+            # Called from checked(), from the loop, from the wait the
+            # caller called.
+            warn_listening(run, stacklevel=5)
             return None
         if run.finished:
-            if not self._include_steps:
+            if not self._wants_steps(run):
                 return None
             self.finished = run
             delay = self._paced(0.0, steady=False)
@@ -470,6 +450,14 @@ class _Waiting:
         if run.status != self._last_status:
             self._last_status = run.status
             logger.info("Run %s is %s", self.run_id, _describe(run.status))
+        return self._still_going(run)
+
+    def _wants_steps(self, run: Run) -> bool:
+        """Whether to fetch the step results of a run that has finished."""
+        return self._include_steps
+
+    def _still_going(self, run: Run) -> float:
+        """Seconds until the next check on a run that hasn't finished."""
         return self._before_deadline(self._paced(self._next_interval()))
 
     def failed(self, error: LodolError) -> float | None:
@@ -497,7 +485,7 @@ class _Waiting:
             return None if self._past_deadline_after(delay) else delay
         return self._before_deadline(delay)
 
-    def result(self) -> Run:
+    def _outcome(self) -> Run:
         """The finished run, if it succeeded; otherwise why not, raised. A
         workflow listening for its trigger is returned as it is."""
         assert self.latest is not None
@@ -505,7 +493,7 @@ class _Waiting:
             return self.latest
         return _succeeded(self.latest)
 
-    def without_steps(self) -> Run:
+    def _outcome_without_steps(self) -> Run:
         """The finished run as the check that saw it finish got it, when its
         step results can't be fetched."""
         assert self.finished is not None
@@ -561,6 +549,68 @@ class _Waiting:
             "runs.stop().",
             run=self.latest,
         )
+
+
+class WaitingForRun(Waiting[Run]):
+    """Waiting for a run to finish (``runs.wait``)."""
+
+    def result(self) -> Run:
+        return self._outcome()
+
+    def without_steps(self) -> Run:
+        return self._outcome_without_steps()
+
+
+def poll(client: Lodol, waiting: Waiting[T]) -> T:
+    """Check on a run, as ``waiting`` says, until it says the wait is over."""
+    delay = waiting.first_delay()
+    while True:
+        if delay:
+            _transport.sleep(delay)
+        try:
+            response = client._send(
+                waiting.next_request(),
+                max_retries=0,
+                timeout=waiting.check_timeout(),
+            )
+        except _PASSING_TROUBLE as exc:
+            next_delay = waiting.failed(exc)
+            if next_delay is None:
+                if waiting.finished is None:
+                    raise
+                return waiting.without_steps()
+            delay = next_delay
+        else:
+            next_delay = waiting.checked(response)
+            if next_delay is None:
+                return waiting.result()
+            delay = next_delay
+
+
+async def apoll(client: AsyncLodol, waiting: Waiting[T]) -> T:
+    """Check on a run, as ``waiting`` says, until it says the wait is over."""
+    delay = waiting.first_delay()
+    while True:
+        if delay:
+            await _transport.async_sleep(delay)
+        try:
+            response = await client._send(
+                waiting.next_request(),
+                max_retries=0,
+                timeout=waiting.check_timeout(),
+            )
+        except _PASSING_TROUBLE as exc:
+            next_delay = waiting.failed(exc)
+            if next_delay is None:
+                if waiting.finished is None:
+                    raise
+                return waiting.without_steps()
+            delay = next_delay
+        else:
+            next_delay = waiting.checked(response)
+            if next_delay is None:
+                return waiting.result()
+            delay = next_delay
 
 
 def _retry_after(error: LodolError) -> float | None:
@@ -751,7 +801,7 @@ def _get_request(run_id: str, include_steps: bool) -> APIRequest:
     )
 
 
-def _parse_run(response: APIResponse) -> Run:
+def parse_run(response: APIResponse) -> Run:
     return Run.from_api(expect_object(response, "/executions/{execution_id}"))
 
 

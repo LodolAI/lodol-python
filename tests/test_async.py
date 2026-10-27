@@ -260,6 +260,53 @@ async def test_approvals_page_past_what_the_key_cant_see(
     assert len(api.requests) == 3
 
 
+async def test_wait_for_an_approval(
+    aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(
+        respond(200, run_json(status="awaiting_approval")),
+        respond(200, {"approvals": [], "next_before": None}),
+        respond(200, run_json(status="awaiting_approval")),
+        respond(200, {"approvals": [approval_json()], "next_before": None}),
+        respond(200, {"approvals": [approval_json()], "next_before": None}),
+        respond(200, run_json(status="success")),
+    )
+
+    approval = await aclient.approvals.wait_for("683b", timeout=60)
+    listed = [a async for a in aclient.approvals.list(run="683b", workflow="665f")]
+    after = await aclient.approvals.wait_for("683b")
+
+    assert approval is not None and approval.id == "a1"
+    assert [a.id for a in listed] == ["a1"]
+    assert api.sent(4)[2] == {
+        "status": "pending",
+        "execution_id": "683b",
+        "workflow_id": "665f",
+        "limit": "100",
+    }
+    assert after is None
+    assert clock.sleeps == [1.0]
+
+
+async def test_wait_for_a_run_that_fails(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(200, run_json(status="failed", error="Bad address")),
+        respond(200, run_json(status="failed", error="Bad address", steps=[])),
+    )
+
+    with pytest.raises(RunFailedError, match="Bad address"):
+        await aclient.approvals.wait_for("683b")
+
+
+async def test_wait_for_a_listening_workflow(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(respond(200, run_json(status="running", is_trigger_listener=True)))
+
+    with pytest.warns(UserWarning, match="it is listening") as warned:
+        assert await aclient.approvals.wait_for("683b") is None
+
+    assert warned[0].filename == __file__
+
+
 async def test_retries_sleep_without_blocking(
     aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
 ) -> None:

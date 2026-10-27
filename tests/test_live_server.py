@@ -165,6 +165,55 @@ def test_a_request_no_longer_pending_says_what_happened_to_it(
         assert lodol.approvals.get("a5").status == ApprovalStatus.CANCELLED
 
 
+def test_answering_what_a_run_asks(server: Server) -> None:
+    server.state.workflows["4e8d"]["asks"].append("Send the receipt?")
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        run = lodol.workflows.run("4e8d")
+
+        first = lodol.approvals.wait_for(run, timeout=10)
+        assert first is not None and first.title == "Pay invoice #4471?"
+        assert first.run_id == run.id
+        lodol.approvals.approve(first)
+
+        # The run reads awaiting_approval a moment longer: carried on past.
+        second = lodol.approvals.wait_for(run, timeout=10)
+        assert second is not None and second.title == "Send the receipt?"
+        assert [a.id for a in lodol.approvals.list(run=run)] == [second.id]
+        assert [a.id for a in lodol.approvals.list(workflow="v4e8d")] == [second.id]
+        lodol.approvals.reject(second)
+
+        assert lodol.approvals.wait_for(run, timeout=10) is None
+        assert lodol.runs.wait(run, timeout=10).outputs == {"paid": False}
+        decided = lodol.approvals.list(run=run, status="decided")
+        assert [a.id for a in decided] == [second.id, first.id]
+
+
+def test_waiting_for_a_run_that_is_stopped_before_it_asks(server: Server) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        run = lodol.workflows.run("4e8d")
+        asked = lodol.approvals.wait_for(run, timeout=10)
+        assert asked is not None
+        lodol.runs.stop(run)
+
+        with pytest.raises(RunFailedError, match="was stopped"):
+            lodol.approvals.wait_for(run, timeout=10)
+        assert lodol.approvals.get(asked).status == ApprovalStatus.CANCELLED
+
+
+def test_waiting_for_an_approval_on_an_older_lodol(server: Server) -> None:
+    """Which lists every run's requests, whatever the run asked for."""
+    server.state.filters_approvals = False
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        run = lodol.workflows.run("4e8d")
+
+        asked = lodol.approvals.wait_for(run, timeout=10)
+
+        assert asked is not None and asked.run_id == run.id
+        assert [a.run_id for a in lodol.approvals.list(run=run)] == [run.id]
+        # A workflow can't be told apart: every pending request is listed.
+        assert len(list(lodol.approvals.list(workflow="4e8d"))) == 3
+
+
 def test_your_own_key_starts_a_run_once(server: Server) -> None:
     with Lodol(api_key=KEY, base_url=address(server)) as lodol:
         first = lodol.workflows.run(

@@ -56,6 +56,15 @@ class StandIn:
             },
             # Starts from its own trigger: running it sets it listening.
             "9b2e": {"id": "9b2e", "name": "New invoices", "inputs": [], "outputs": []},
+            # Its runs ask for approval before they pay, once for each of
+            # "asks", and say whether they paid.
+            "4e8d": {
+                "id": "4e8d",
+                "name": "Pay invoice",
+                "inputs": [],
+                "outputs": [{"name": "paid", "type": "boolean", "description": ""}],
+                "asks": ["Pay invoice #4471?"],
+            },
             # Its accounting system is down the first time it runs; a retry
             # gets through.
             "5c3d": {
@@ -90,6 +99,10 @@ class StandIn:
         # Workflows the key's member can't see: their approval requests are
         # left out after a page is read, as the server leaves them out.
         self.hidden_workflows: set[str] = set()
+        # False for an older Lodol, which lists approval requests from every
+        # run and workflow whatever execution_id and workflow_id say.
+        self.filters_approvals = True
+        self.next_approval_id = 3
         self.headers_seen: list[dict[str, str]] = []
         self.slow_seconds = 0.0
         # How long starting a run takes, during which a retry under the same
@@ -250,6 +263,12 @@ class Handler(BaseHTTPRequestHandler):
                 if wanted == "all"
                 or (a["status"] == "pending") == (wanted == "pending")
             ]
+            if state.filters_approvals and "execution_id" in query:
+                items = [a for a in items if a["execution_id"] == query["execution_id"]]
+            if state.filters_approvals and "workflow_id" in query:
+                # Its family id, or any version's.
+                family = query["workflow_id"].removeprefix("v")
+                items = [a for a in items if a["workflow_id"] == family]
             limit = int(query.get("limit", 20))
             if "before" in query:
                 ids = [a["id"] for a in items]
@@ -403,6 +422,9 @@ class Handler(BaseHTTPRequestHandler):
                 }
             ],
         }
+        workflow = state.workflows.get(workflow_id) or {}
+        # The questions it will ask, the one it is asking, and the answers.
+        run.update(asks=list(workflow.get("asks") or []), asking=None, answers=[])
         if workflow_id == "665f":
             run["steps"] += [
                 # Failed, and its setting let the run carry on, after
@@ -501,11 +523,37 @@ class Handler(BaseHTTPRequestHandler):
         state.polls[run["execution_id"]] = state.polls.get(run["execution_id"], 0) + 1
         if state.polls[run["execution_id"]] == 1:
             run["status"], run["started_at"] = "running", "2026-10-13T09:00:01+00:00"
+        elif run["asking"] is not None:
+            approval = next(a for a in state.approvals if a["id"] == run["asking"])
+            if approval["status"] == "pending":
+                return
+            if run.pop("answer_seen", None) is None:
+                # Answered, but the run reads awaiting_approval a moment
+                # longer, until it has picked the answer up.
+                run["answer_seen"] = True
+                return
+            run["answers"].append(approval["status"])
+            run["status"], run["asking"] = "running", None
+        elif run["asks"]:
+            approval = {
+                "id": f"a{state.next_approval_id}",
+                "kind": "approval",
+                "status": "pending",
+                "title": run["asks"].pop(0),
+                "execution_id": run["execution_id"],
+                "workflow_id": run["workflow_id"],
+                "workflow_name": run["workflow_name"],
+            }
+            state.next_approval_id += 1
+            state.approvals.insert(0, approval)
+            run["status"], run["asking"] = "awaiting_approval", approval["id"]
         else:
             run["status"] = "failed" if run["failure"] else "success"
             run["completed_at"] = "2026-10-13T09:00:04+00:00"
             if run["failure"]:
                 run["error"] = run["failure"]
+            elif run["workflow_id"] == "4e8d":
+                run["outputs"] = {"paid": "rejected" not in run["answers"]}
             elif run["workflow_id"] in _OUTPUTS:
                 run["outputs"] = dict(_OUTPUTS[run["workflow_id"]])
 

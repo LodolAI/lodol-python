@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import httpx2
 import pytest
 
 from lodol import (
@@ -15,8 +16,19 @@ from lodol import (
     Lodol,
     NotFoundError,
     PermissionDeniedError,
+    Run,
+    RunFailedError,
+    WaitTimeoutError,
+    Workflow,
 )
-from tests.conftest import ApprovalsServer, FakeAPI, approval_json, respond
+from tests.conftest import (
+    ApprovalsServer,
+    FakeAPI,
+    FakeClock,
+    approval_json,
+    respond,
+    run_json,
+)
 
 
 def test_list_pending_by_default(client: Lodol, api: FakeAPI) -> None:
@@ -264,3 +276,257 @@ def test_refusals_carry_the_servers_words(
 
     with pytest.raises(error_type, match=message):
         client.approvals.approve("a1")
+
+
+# ── One run's or one workflow's ──────────────────────────────────────────
+
+
+def test_list_one_runs_requests(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"approvals": [approval_json()], "next_before": None}))
+
+    (approval,) = client.approvals.list(run=Run(id="683b", status="awaiting_approval"))
+
+    assert api.sent()[2] == {
+        "status": "pending",
+        "execution_id": "683b",
+        "limit": "100",
+    }
+    assert approval.run_id == "683b"
+
+
+def test_list_one_workflows_requests_of_any_status(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"approvals": [approval_json()], "next_before": None}))
+
+    list(client.approvals.list(workflow=Workflow(id="665f", name="x"), status="all"))
+
+    assert api.sent()[2] == {"status": "all", "workflow_id": "665f", "limit": "100"}
+
+
+def test_an_older_lodol_that_lists_every_runs_requests(
+    client: Lodol, api: FakeAPI
+) -> None:
+    """It ignores the run asked for, so the SDK keeps only that run's. It
+    can't do the same for a workflow, which may be named by a version's id."""
+    page = {
+        "approvals": [
+            approval_json(id="a3", execution_id="684c"),
+            approval_json(id="a2", execution_id="683b"),
+            approval_json(id="a1", execution_id="684c", workflow_id="7a1c"),
+        ],
+        "next_before": None,
+    }
+    api.queue(respond(200, page), respond(200, page))
+
+    assert [a.id for a in client.approvals.list(run="683b")] == ["a2"]
+    assert len(list(client.approvals.list(workflow="v665f"))) == 3
+
+
+def test_a_filter_is_checked_before_anything_is_sent(
+    client: Lodol, api: FakeAPI
+) -> None:
+    with pytest.raises(TypeError, match="Expected a run id or a Run, not Workflow"):
+        client.approvals.list(run=Workflow(id="665f", name="x"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="workflow id is empty"):
+        client.approvals.list(workflow=" ")
+
+    assert api.requests == []
+
+
+def test_a_filtered_list_says_what_it_is(client: Lodol) -> None:
+    assert repr(client.approvals.list(run="683b", workflow="665f", limit=2)) == (
+        "<Paginator: up to 2 pending approval requests from run 683b from "
+        "workflow 665f, newest first; loop over it to fetch them>"
+    )
+
+
+# ── Waiting for a run to ask ─────────────────────────────────────────────
+
+
+def asking(
+    *items: dict[str, object], next_before: str | None = None
+) -> httpx2.Response:
+    return respond(200, {"approvals": list(items), "next_before": next_before})
+
+
+def test_wait_for_returns_the_request_once_the_run_asks(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(
+        respond(200, run_json(status="running")),
+        respond(200, run_json(status="awaiting_approval")),
+        asking(approval_json()),
+    )
+
+    approval = client.approvals.wait_for("683b")
+
+    assert approval is not None and approval.id == "a1" and approval.pending
+    assert [api.sent(i)[1] for i in range(3)] == [
+        "/executions/683b",
+        "/executions/683b",
+        "/approvals",
+    ]
+    assert api.sent(2)[2] == {
+        "status": "pending",
+        "execution_id": "683b",
+        "limit": "100",
+    }
+    # Checked as runs.wait checks; the run's requests looked for right after.
+    assert clock.sleeps == [1.0]
+
+
+def test_wait_for_carries_on_until_the_next_request_is_there(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    """Right after an answer, the run still reads awaiting_approval for a
+    moment, and its next request isn't there yet."""
+    api.queue(
+        respond(200, run_json(status="awaiting_approval")),
+        asking(),
+        respond(200, run_json(status="running")),
+        respond(200, run_json(status="awaiting_approval")),
+        asking(approval_json(id="a2", title="Send the receipt?")),
+    )
+
+    approval = client.approvals.wait_for("683b")
+
+    assert approval is not None and approval.id == "a2"
+    # The checks on the run back off as runs.wait's do.
+    assert clock.sleeps == [1.0, 1.5]
+
+
+def test_wait_for_keeps_to_the_runs_own_requests(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    """An older Lodol lists every run's requests, a page at a time."""
+    api.queue(
+        respond(200, run_json(status="awaiting_approval")),
+        asking(approval_json(id="a9", execution_id="684c"), next_before="a9"),
+        asking(approval_json(id="a8", execution_id="683b")),
+    )
+
+    approval = client.approvals.wait_for("683b")
+
+    assert approval is not None and approval.id == "a8"
+    assert api.sent(2)[2]["before"] == "a9"
+
+
+def test_wait_for_a_run_that_succeeds_without_asking(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(respond(200, run_json(status="success")))
+
+    assert client.approvals.wait_for("683b") is None
+    # Nothing more: not its step results, nor its requests.
+    assert len(api.requests) == 1
+
+
+def test_wait_for_a_run_that_fails_first(client: Lodol, api: FakeAPI) -> None:
+    steps = [{"index": 0, "status": "failed", "error": "Sheet not found"}]
+    api.queue(
+        respond(200, run_json(status="failed", error="Sheet not found")),
+        respond(200, run_json(status="failed", error="Sheet not found", steps=steps)),
+    )
+
+    with pytest.raises(RunFailedError, match="Run 683b failed: Sheet not found") as exc:
+        client.approvals.wait_for("683b")
+
+    # With its step results, as runs.wait gives a failed run.
+    assert exc.value.run.steps is not None
+    assert api.sent(1)[2] == {"include_step_results": "true"}
+
+
+def test_wait_for_a_run_stopped_first(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(200, run_json(status="stopped")),
+        *[httpx2.ConnectError("refused")] * 100,
+    )
+
+    with pytest.raises(RunFailedError, match="was stopped before it finished"):
+        client.approvals.wait_for("683b")
+
+
+def test_wait_for_gives_up_at_its_timeout(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(
+        *[respond(200, run_json(status="awaiting_approval")), asking()] * 5,
+    )
+
+    with pytest.raises(WaitTimeoutError) as exc:
+        client.approvals.wait_for(Run(id="683b", status="queued"), timeout=3)
+
+    assert "after 3 seconds: it is waiting for someone to answer" in str(exc.value)
+    assert sum(clock.sleeps) == pytest.approx(3.0)
+
+
+def test_wait_for_rides_out_trouble_when_looking(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    limited = respond(429, {"error": "Rate limit exceeded."}, {"Retry-After": "30"})
+    api.queue(
+        respond(200, run_json(status="awaiting_approval")),
+        httpx2.ConnectError("refused"),
+        limited,
+        asking(approval_json()),
+    )
+
+    approval = client.approvals.wait_for("683b")
+
+    assert approval is not None
+    # The failed look is tried again, not the run's check.
+    assert [api.sent(i)[1] for i in range(1, 4)] == ["/approvals"] * 3
+    assert 30.0 in clock.sleeps
+
+
+def test_wait_for_paces_every_request_to_the_allowance(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    """On the Free plan's 5 requests a minute, no request comes sooner than
+    12 seconds after the one before, looking for the run's request too."""
+    headers = {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Remaining": "4",
+        "X-RateLimit-Reset": "50",
+    }
+    api.queue(
+        respond(200, run_json(status="running"), headers),
+        respond(200, run_json(status="awaiting_approval"), headers),
+        respond(200, {"approvals": [], "next_before": None}, headers),
+        respond(200, run_json(status="awaiting_approval"), headers),
+        respond(200, {"approvals": [approval_json()], "next_before": None}, headers),
+    )
+
+    assert client.approvals.wait_for("683b") is not None
+
+    assert clock.sleeps == [12.0, 12.0, 12.0, 12.0]
+
+
+def test_wait_for_a_listening_workflow_returns_none(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(
+        respond(
+            200,
+            run_json(
+                status="running", is_trigger_listener=True, workflow_name="New invoices"
+            ),
+        )
+    )
+
+    with pytest.warns(UserWarning, match="'New invoices' starts from its own") as w:
+        assert client.approvals.wait_for("683b") is None
+
+    assert len(api.requests) == 1
+    # Pointed at the caller's own line.
+    assert w[0].filename == __file__
+
+
+def test_wait_for_is_checked_before_anything_is_sent(
+    client: Lodol, api: FakeAPI
+) -> None:
+    with pytest.raises(TypeError, match="Expected a run id or a Run, not Approval"):
+        client.approvals.wait_for(Approval(id="a1", kind="approval", status="pending"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="timeout must be 0 or more"):
+        client.approvals.wait_for("683b", timeout=-1)
+
+    assert api.requests == []

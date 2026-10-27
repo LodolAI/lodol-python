@@ -143,6 +143,22 @@ Deleting a run removes it from the history, as deleting it in Lodol does, along 
 A workflow's **Request approval** step pauses its run until someone answers. Your own system can answer instead of a person in Lodol:
 
 ```python
+run = lodol.workflows.run("4e8d...")
+
+approval = lodol.approvals.wait_for(run)  # until the run asks
+if approval is not None:
+    print(approval.title)  # "Pay invoice #4471?"
+    lodol.approvals.approve(approval, comment="Matches the purchase order")
+
+run = lodol.runs.wait(run)
+print(run.outputs)  # {"paid": True}
+```
+
+`wait_for` waits until the run asks for an answer and returns the request it's waiting on, or `None` if the run succeeds without asking. It paces itself as `runs.wait` does, raises `RunFailedError` if the run fails or is stopped first, and takes a `timeout` too. A run can ask more than once: call `wait_for` again after each answer. A workflow that starts from its own trigger never asks itself, since the runs its events start do, so `wait_for` returns `None` for it at once, with a warning.
+
+To answer whatever is waiting, from any run:
+
+```python
 for approval in lodol.approvals.list():  # pending ones, newest first
     print(approval.title, approval.details, approval.workflow_name)
 
@@ -153,7 +169,7 @@ for approval in lodol.approvals.list():  # pending ones, newest first
         # or lodol.approvals.reject(approval, comment="Wrong amount")
 ```
 
-The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how.
+The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how. `approvals.list(run=...)` lists one run's requests, and `workflow=` one workflow's.
 
 A request that's no longer pending can't be answered: you get `ConflictError`, whose `code` says what happened to it. `"approval_already_answered"`: someone answered it first. `"approval_expired"`: nobody answered in time, so it closed, or the step's time limit decided it automatically. `"approval_withdrawn"`: the run was stopped, or its workflow deleted, before anyone answered.
 

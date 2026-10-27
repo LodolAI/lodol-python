@@ -49,7 +49,7 @@ class Paginator(Generic[T]):
             # with one is a page of things the key can't see.
             if next_cursor is None:
                 return
-            cursor = _advance(cursor, next_cursor)
+            cursor = advance(cursor, next_cursor)
 
     def __repr__(self) -> str:
         return _describe(type(self).__name__, self._noun, self._limit)
@@ -80,7 +80,7 @@ class AsyncPaginator(Generic[T]):
             # with one is a page of things the key can't see.
             if next_cursor is None:
                 return
-            cursor = _advance(cursor, next_cursor)
+            cursor = advance(cursor, next_cursor)
 
     def __repr__(self) -> str:
         return _describe(type(self).__name__, self._noun, self._limit)
@@ -94,7 +94,7 @@ def check_limit(limit: int | None) -> int | None:
     return limit
 
 
-def _advance(cursor: str | None, next_cursor: str) -> str:
+def advance(cursor: str | None, next_cursor: str) -> str:
     # A page that points back at itself would be fetched forever.
     if next_cursor == cursor:
         raise APIResponseValidationError(
