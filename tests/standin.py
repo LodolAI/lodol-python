@@ -78,6 +78,9 @@ class StandIn:
                 "workflow_id": "665f",
             },
         ]
+        # Workflows the key's member can't see: their approval requests are
+        # left out after a page is read, as the server leaves them out.
+        self.hidden_workflows: set[str] = set()
         self.headers_seen: list[dict[str, str]] = []
         self.slow_seconds = 0.0
         # How long starting a run takes, during which a retry under the same
@@ -238,16 +241,18 @@ class Handler(BaseHTTPRequestHandler):
             if "before" in query:
                 ids = [a["id"] for a in items]
                 items = items[ids.index(query["before"]) + 1 :]
-            page = items[:limit]
+            read = items[:limit]
             return self._reply(
                 200,
                 {
-                    "approvals": page,
-                    "next_before": page[-1]["id"] if len(page) == limit else None,
+                    "approvals": [a for a in read if self._reachable(state, a)],
+                    # The last one read, reported or not, so paging goes on
+                    # past a page that was all left out.
+                    "next_before": read[-1]["id"] if len(read) == limit else None,
                 },
             )
         if method == "GET" and parts[:1] == ["approvals"] and len(parts) == 2:
-            approval = next((a for a in state.approvals if a["id"] == parts[1]), None)
+            approval = self._approval(state, parts[1])
             if approval is None:
                 return self._error(404, "Approval request not found")
             return self._reply(200, approval)
@@ -422,8 +427,19 @@ class Handler(BaseHTTPRequestHandler):
         )
         return {name: run[name] for name in fields}
 
-    def _decide(self, state: StandIn, approval_id: str, raw: bytes) -> tuple[int, Any]:
+    @staticmethod
+    def _reachable(state: StandIn, approval: dict[str, Any]) -> bool:
+        return approval.get("workflow_id") not in state.hidden_workflows
+
+    def _approval(self, state: StandIn, approval_id: str) -> dict[str, Any] | None:
+        # A request the key can't see is one it can't read or answer either.
         approval = next((a for a in state.approvals if a["id"] == approval_id), None)
+        if approval is None or not self._reachable(state, approval):
+            return None
+        return approval
+
+    def _decide(self, state: StandIn, approval_id: str, raw: bytes) -> tuple[int, Any]:
+        approval = self._approval(state, approval_id)
         if approval is None:
             return 404, {"error": "Approval request not found."}
         data = json.loads(raw)

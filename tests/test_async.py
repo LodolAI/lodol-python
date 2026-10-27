@@ -18,6 +18,7 @@ from lodol import (
     WaitTimeoutError,
 )
 from tests.conftest import (
+    ApprovalsServer,
     FakeAPI,
     FakeClock,
     approval_json,
@@ -166,6 +167,27 @@ async def test_approvals(aclient: AsyncLodol, api: FakeAPI) -> None:
     assert replied.status == "replied" and fetched.pending
     assert api.body(1) == {"decision": "approved", "comment": "OK"}
     assert api.body(3) == {"reply": "4471"}
+
+
+async def test_approvals_page_past_what_the_key_cant_see(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    server = ApprovalsServer(
+        [
+            approval_json(id="a4"),
+            approval_json(id="a3", workflow_id="7a1c"),
+            approval_json(id="a2", workflow_id="7a1c"),
+            approval_json(id="a1"),
+        ],
+        hidden_workflows={"7a1c"},
+    )
+    api.queue(*[server] * 3)
+
+    ids = [approval.id async for approval in aclient.approvals.list(limit=2)]
+
+    # The second page read only a2, which the key can't see.
+    assert ids == ["a4", "a1"]
+    assert len(api.requests) == 3
 
 
 async def test_retries_sleep_without_blocking(

@@ -85,6 +85,28 @@ def test_paging_through_real_history(server: Server) -> None:
         assert len(server.state.headers_seen) - before == 1
 
 
+def test_approvals_the_key_cant_see_dont_cut_a_list_short(server: Server) -> None:
+    """The stand-in, like the server, leaves out requests from workflows the
+    key's member can't see after reading a page."""
+    server.state.hidden_workflows = {"7a1c"}
+    server.state.approvals = [
+        {
+            "id": f"a{n}",
+            "kind": "approval",
+            "status": "pending",
+            "title": f"Request {n}",
+            "execution_id": "r0",
+            "workflow_id": "7a1c" if n in (2, 3, 5) else "665f",
+        }
+        for n in range(6, 0, -1)
+    ]
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        assert [a.id for a in lodol.approvals.list(limit=3)] == ["a6", "a4", "a1"]
+        assert [a.id for a in lodol.approvals.list()] == ["a6", "a4", "a1"]
+        with pytest.raises(NotFoundError):
+            lodol.approvals.get("a5")
+
+
 def test_your_own_key_starts_a_run_once(server: Server) -> None:
     with Lodol(api_key=KEY, base_url=address(server)) as lodol:
         first = lodol.workflows.run(

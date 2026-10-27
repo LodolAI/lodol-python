@@ -16,7 +16,7 @@ from lodol import (
     NotFoundError,
     PermissionDeniedError,
 )
-from tests.conftest import FakeAPI, approval_json, respond
+from tests.conftest import ApprovalsServer, FakeAPI, approval_json, respond
 
 
 def test_list_pending_by_default(client: Lodol, api: FakeAPI) -> None:
@@ -64,6 +64,64 @@ def test_list_pages_with_the_cursor_the_api_gives(client: Lodol, api: FakeAPI) -
 
     assert ids == ["a2", "a1"]
     assert api.sent(1)[2] == {"status": "all", "limit": "100", "before": "a2"}
+
+
+def test_list_carries_on_past_a_page_the_key_cant_see(
+    client: Lodol, api: FakeAPI
+) -> None:
+    """Lodol leaves out requests from workflows the key's member can't see
+    after reading a page, so a page can come back empty and not be the last."""
+    api.queue(
+        respond(200, {"approvals": [approval_json(id="a4")], "next_before": "a3"}),
+        respond(200, {"approvals": [], "next_before": "a2"}),
+        respond(200, {"approvals": [approval_json(id="a1")], "next_before": None}),
+    )
+
+    ids = [approval.id for approval in client.approvals.list()]
+
+    assert ids == ["a4", "a1"]
+    assert api.sent(2)[2]["before"] == "a2"
+    assert len(api.requests) == 3
+
+
+def hidden_and_shown() -> ApprovalsServer:
+    # Newest first; the requests from 7a1c are from a workflow the key's
+    # member can't see.
+    return ApprovalsServer(
+        [
+            approval_json(id="a6"),
+            approval_json(id="a5", workflow_id="7a1c"),
+            approval_json(id="a4"),
+            approval_json(id="a3"),
+            approval_json(id="a2", workflow_id="7a1c"),
+            approval_json(id="a1"),
+        ],
+        hidden_workflows={"7a1c"},
+    )
+
+
+def test_a_limit_counts_only_what_the_key_can_see(client: Lodol, api: FakeAPI) -> None:
+    """With a limit, each page asks for only as many as are still wanted, so
+    the last page asked for can be one the key can't see at all: listing
+    carries on past it rather than coming up short."""
+    api.queue(*[hidden_and_shown()] * 5)
+
+    ids = [approval.id for approval in client.approvals.list(limit=4)]
+
+    assert ids == ["a6", "a4", "a3", "a1"]
+    assert [api.sent(i)[2].get("limit") for i in range(len(api.requests))] == [
+        "4",
+        "1",
+        "1",
+    ]
+
+
+def test_every_request_the_key_can_see_is_listed(client: Lodol, api: FakeAPI) -> None:
+    api.queue(*[hidden_and_shown()] * 5)
+
+    ids = [approval.id for approval in client.approvals.list(status="all")]
+
+    assert ids == ["a6", "a4", "a3", "a1"]
 
 
 def test_list_refuses_an_unknown_status(client: Lodol, api: FakeAPI) -> None:
