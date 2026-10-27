@@ -20,11 +20,11 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 - `Workflow.is_draft`. Times are timezone-aware `datetime`s, step results are `Step` objects, which say why a step was skipped (`reason`) and how many tries it took (`attempts`), and `RunStatus`, `StepStatus` and `ApprovalStatus` list the statuses. A step that failed but was let carry on is `"continued"`, and never taken for the step that failed a run.
 - Dates, times, `Decimal`s and UUIDs in `inputs` are sent as text Lodol reads, and an input that can't be sent is named before anything is sent.
 - Any text works as an `idempotency_key`, and the same inputs are always sent byte for byte the same way, so a key always recognizes its request.
-- A workflow that starts from its own trigger, run with `wait=True` or waited on with `runs.wait`, returns at once with a warning, naming the workflow: its run is it listening, and never ends. `run.is_trigger_listener` says so, since its status reads `"running"` the whole time. A failed run says why in `run.error` in `runs.list` too.
+- A workflow that starts from its own trigger, run with `wait=True` or waited on with `runs.wait`, returns at once with a warning, naming the workflow: its run is it listening, and never ends. `run.is_trigger_listener` says so, since its status reads `"running"` the whole time, and `workflow.starts_from_trigger` says so before it runs. A failed run says why in `run.error` in `runs.list` too.
 - Models can be hashed, and errors can be pickled, so both cross process boundaries (multiprocessing, task queues).
 - `LODOL_LOG=info` or `LODOL_LOG=debug` turns on logging.
 
-0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener`, `retry_options` and `request_id` the SDK relies on, retries runs, filters runs by status, start time and search, lists one run's or one workflow's approval requests, and says why one can't be answered. Update an older Lodol Local before upgrading.
+0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener`, `starts_from_trigger`, `retry_options` and `request_id` the SDK relies on, retries runs, filters runs by status, start time and search, lists one run's or one workflow's approval requests, and says why one can't be answered. Update an older Lodol Local before upgrading.
 
 ### Fixed
 

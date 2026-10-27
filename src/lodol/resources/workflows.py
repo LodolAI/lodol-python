@@ -65,9 +65,9 @@ class Workflows:
         ``RunFailedError`` if it fails or is stopped; ``timeout`` then bounds
         the wait in seconds (see ``runs.wait``).
 
-        A workflow that starts from its own trigger or schedule doesn't run
-        to an end: running it sets it listening, and each event it catches
-        starts a run of its own. With ``wait=True`` it returns at once, with
+        A workflow that starts from its own trigger or schedule
+        (``workflow.starts_from_trigger``) doesn't run to an end: running it
+        sets it listening, and each event it catches starts a run of its own. With ``wait=True`` it returns at once, with
         a warning, since there is no end to wait for.
 
         A retried request never starts a second run. To make sure a run
@@ -140,9 +140,9 @@ class AsyncWorkflows:
         ``RunFailedError`` if it fails or is stopped; ``timeout`` then bounds
         the wait in seconds (see ``runs.wait``).
 
-        A workflow that starts from its own trigger or schedule doesn't run
-        to an end: running it sets it listening, and each event it catches
-        starts a run of its own. With ``wait=True`` it returns at once, with
+        A workflow that starts from its own trigger or schedule
+        (``workflow.starts_from_trigger``) doesn't run to an end: running it
+        sets it listening, and each event it catches starts a run of its own. With ``wait=True`` it returns at once, with
         a warning, since there is no end to wait for.
 
         A retried request never starts a second run. To make sure a run

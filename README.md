@@ -59,7 +59,7 @@ lodol.workflows.run(
 
 Within 24 hours, the same key with the same inputs returns the run it already started, even if the first attempt is still under way. The same key with different inputs raises `UnprocessableEntityError`. Any text up to 256 characters works as a key.
 
-**Workflows that start themselves.** A workflow that starts from its own trigger or schedule doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own, which `runs.list` lists. The listening run has `run.is_trigger_listener` set, and its status reads `"running"` for as long as it listens. Waiting on it, with `wait=True` or `runs.wait`, returns it at once, with a warning, since there's no end to wait for.
+**Workflows that start themselves.** A workflow that starts from its own trigger or schedule, which `workflow.starts_from_trigger` says, doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own, which `runs.list` lists. The listening run has `run.is_trigger_listener` set, and its status reads `"running"` for as long as it listens. Waiting on it, with `wait=True` or `runs.wait`, returns it at once, with a warning, since there's no end to wait for.
 
 ## Wait for a run
 

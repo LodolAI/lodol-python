@@ -55,7 +55,13 @@ class StandIn:
                 "outputs": [],
             },
             # Starts from its own trigger: running it sets it listening.
-            "9b2e": {"id": "9b2e", "name": "New invoices", "inputs": [], "outputs": []},
+            "9b2e": {
+                "id": "9b2e",
+                "name": "New invoices",
+                "inputs": [],
+                "outputs": [],
+                "starts_from_trigger": True,
+            },
             # Its runs ask for approval before they pay, once for each of
             # "asks", and say whether they paid.
             "4e8d": {
@@ -187,13 +193,17 @@ class Handler(BaseHTTPRequestHandler):
         raw: bytes,
     ) -> None:
         if method == "GET" and parts == ["workflows"]:
-            return self._reply(200, {"workflows": list(state.workflows.values())})
+            return self._reply(
+                200, {"workflows": [_shown(w) for w in state.workflows.values()]}
+            )
         if parts[:1] == ["workflows"] and len(parts) == 2:
             workflow = state.workflows.get(parts[1])
             if workflow is None:
                 return self._error(404, "Workflow not found")
             if method == "GET":
-                return self._reply(200, {**workflow, "program": {"kind": "Program"}})
+                return self._reply(
+                    200, {**_shown(workflow), "program": {"kind": "Program"}}
+                )
             del state.workflows[parts[1]]
             self._withdraw(
                 state, because="The workflow was deleted.", workflow_id=parts[1]
@@ -388,10 +398,11 @@ class Handler(BaseHTTPRequestHandler):
     ) -> dict[str, Any]:
         run_id = f"r{state.next_id}"
         state.next_id += 1
+        workflow = state.workflows.get(workflow_id) or {}
         failure = _FAILURES.get(workflow_id)
         if workflow_id == "5c3d" and retry_of is not None:
             failure = None  # The accounting system is back.
-        listening = workflow_id == "9b2e"
+        listening = bool(workflow.get("starts_from_trigger"))
         run: dict[str, Any] = {
             "execution_id": run_id,
             "workflow_id": workflow_id,
@@ -422,7 +433,6 @@ class Handler(BaseHTTPRequestHandler):
                 }
             ],
         }
-        workflow = state.workflows.get(workflow_id) or {}
         # The questions it will ask, the one it is asking, and the answers.
         run.update(asks=list(workflow.get("asks") or []), asking=None, answers=[])
         if workflow_id == "665f":
@@ -754,6 +764,16 @@ def _run_time(raw: str | None, name: str) -> dt.datetime | None:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=dt.timezone.utc)
     return moment
+
+
+def _shown(workflow: dict[str, Any]) -> dict[str, Any]:
+    # A workflow as the workflow endpoints give it, without what only the
+    # stand-in keeps (the questions its runs ask).
+    fields = ("id", "name", "description", "publish_state", "inputs", "outputs")
+    return {
+        **{name: workflow[name] for name in fields if name in workflow},
+        "starts_from_trigger": bool(workflow.get("starts_from_trigger")),
+    }
 
 
 def _started(run: dict[str, Any]) -> dt.datetime:

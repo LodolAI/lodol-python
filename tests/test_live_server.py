@@ -281,6 +281,9 @@ def test_a_slow_start_is_waited_for_not_repeated(server: Server) -> None:
 
 def test_a_workflow_that_starts_itself(server: Server) -> None:
     with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        listening = [w.id for w in lodol.workflows.list() if w.starts_from_trigger]
+        assert listening == ["9b2e"]
+        assert lodol.workflows.get("9b2e").starts_from_trigger
         # Lodol names the workflow it started, so the warning can.
         with pytest.warns(UserWarning, match="'New invoices' starts from its own"):
             run = lodol.workflows.run("9b2e", wait=True)

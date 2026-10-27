@@ -54,6 +54,31 @@ def test_list(client: Lodol, api: FakeAPI) -> None:
     assert draft.is_draft
 
 
+def test_a_workflow_says_whether_it_starts_from_its_own_trigger(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(
+        respond(
+            200,
+            {
+                "workflows": [
+                    workflow_json(id="9b2e", starts_from_trigger=True),
+                    workflow_json(starts_from_trigger=False),
+                    # From a Lodol that doesn't say.
+                    workflow_json(id="7a1c"),
+                ]
+            },
+        ),
+        respond(200, workflow_json(id="9b2e", starts_from_trigger=True)),
+    )
+
+    listener, report, older = client.workflows.list()
+
+    assert listener.starts_from_trigger
+    assert not report.starts_from_trigger and not older.starts_from_trigger
+    assert client.workflows.get("9b2e").starts_from_trigger
+
+
 def test_a_workflow_from_before_drafts_runs(client: Lodol, api: FakeAPI) -> None:
     api.queue(respond(200, {"workflows": [workflow_json()]}))
 

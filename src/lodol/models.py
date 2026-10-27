@@ -139,6 +139,10 @@ class Workflow:
     outputs: list[WorkflowOutput] = field(default_factory=list, hash=False)
     """What a run that succeeds hands back, in ``Run.outputs``."""
     is_draft: bool = False
+    starts_from_trigger: bool = False
+    """Whether it starts from its own trigger or schedule. Running it only
+    sets it listening (``Run.is_trigger_listener``), and each event it
+    catches starts a run of its own."""
     created_by: str | None = None
     created_at: dt.datetime | None = None
     updated_at: dt.datetime | None = None
@@ -171,6 +175,7 @@ class Workflow:
             # Only an explicit draft is one: a workflow from before drafts
             # existed has no publish state, and runs.
             is_draft=raw.get("publish_state") == "draft",
+            starts_from_trigger=bool(raw.get("starts_from_trigger")),
             created_by=_optional_str(raw.get("created_by")),
             created_at=parse_datetime(raw.get("created_at")),
             updated_at=parse_datetime(raw.get("updated_at")),
