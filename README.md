@@ -82,6 +82,25 @@ else:
 
 The finished run comes with its outputs (`run.outputs`) and its step results (`run.steps`). An output the run never set is `None`. `RunFailedError` carries the run too, as `error.run`, so you can see which step failed. If the run has finished but its step results can't be fetched in time, you get the run without them rather than an error. Without a `timeout`, `wait` waits as long as the run takes, including while it waits for someone to answer an approval.
 
+## Retry a failed run
+
+```python
+from lodol import RunFailedError
+
+try:
+    run = lodol.workflows.run("5c3d...", wait=True)
+except RunFailedError as error:
+    print(error.run.error)  # "The accounting system didn't answer"
+    # Once it's back, pick up at the step that failed:
+    run = lodol.runs.retry(error.run, wait=True)
+
+print(run.outputs)  # {"synced": 12}
+```
+
+A retry is a new run, with the data the failed one started with (its inputs, or the event its trigger caught), and its `retry_of` is the failed run's `id`. By default it picks up at the step that failed, without running the steps before it again, so what they did (an email sent, a row added) isn't done twice. If the workflow has been edited since, the retry runs it as it is now when the steps before the one that failed are unchanged, so a fix to that step is picked up. `from_start=True` runs the whole workflow again instead. `wait`, `timeout` and `idempotency_key` work as they do for `workflows.run`.
+
+`runs.get(run).retry_options` says which retries a failed run offers. A run that didn't fail can't be retried, nor can one a run calling its workflow started (retry that run instead), and one that failed before Lodol kept where runs fail can only be retried from the start. Asking for a retry a run doesn't offer raises `ConflictError` with `code` `"run_not_retryable"`.
+
 ## Follow runs
 
 ```python
@@ -157,8 +176,8 @@ When Lodol or the network says no, the SDK raises a `LodolError`. Errors from th
 
 ## What happens automatically
 
-- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads; runs, stops and approval answers, which carry an idempotency key; and anything a rate limit refused, since Lodol refuses before doing anything. A delete that fails otherwise, and limits that last longer, are reported at once.
-- **Idempotency keys.** Every run, stop and approval answer gets one, so a retry can never start a second run or answer twice. If a retry finds Lodol still working on the first attempt, it waits for that, up to five minutes, rather than starting again.
+- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads; runs, run retries, stops and approval answers, which carry an idempotency key; and anything a rate limit refused, since Lodol refuses before doing anything. A delete that fails otherwise, and limits that last longer, are reported at once.
+- **Idempotency keys.** Every run, run retry, stop and approval answer gets one, so a retry can never start a second run or answer twice. If a retry finds Lodol still working on the first attempt, it waits for that, up to five minutes, rather than starting again.
 - **Timeouts.** Each request may take 30 seconds (`timeout`). Waiting for a run has its own `timeout`.
 - **Security.** Your key is only sent over HTTPS, except to Lodol Local on your own machine, which is reached directly, never through a proxy. It never appears in logs or reprs.
 

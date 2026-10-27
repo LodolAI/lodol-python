@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import httpx2
 import pytest
@@ -16,6 +17,7 @@ from lodol import (
     Lodol,
     NotFoundError,
     PermissionDeniedError,
+    RetryOptions,
     Run,
     RunFailedError,
     RunStatus,
@@ -496,6 +498,176 @@ def test_delete_refusals_carry_the_servers_words(
         client.runs.delete("683b")
 
     assert str(exc.value) == message
+
+
+# ── Retrying ─────────────────────────────────────────────────────────────
+
+
+def retry_json(**fields: object) -> dict[str, object]:
+    return {
+        "execution_id": "684c",
+        "retry_of": "683b",
+        "workflow_id": "665f",
+        "version_id": "6683",
+        "workflow_name": "Monthly report",
+        "from": "failed_step",
+        "version": "latest",
+        "failed_step": {"error_type": "step_failed", "retryable": True},
+        "status": "queued",
+        **fields,
+    }
+
+
+def test_retry_picks_up_at_the_failed_step(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, retry_json()))
+
+    retry = client.runs.retry("683b")
+
+    assert api.sent() == ("POST", "/executions/683b/retry", {})
+    assert api.body() == {"from": "failed_step"}
+    assert api.last.headers["Idempotency-Key"].startswith("lodol-run-retry-")
+    assert retry.id == "684c" and retry.retry_of == "683b"
+    assert retry.status == "queued"
+    assert (retry.workflow_id, retry.version_id) == ("665f", "6683")
+    assert retry.workflow_name == "Monthly report"
+    # What the SDK doesn't model is still there.
+    assert retry.raw["version"] == "latest"
+    # The start of a run doesn't say how it could be retried.
+    assert retry.retry_options is None
+
+
+def test_retry_from_the_start(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, retry_json(**{"from": "start"})))
+
+    client.runs.retry(Run(id="683b", status="failed"), from_start=True)
+
+    assert api.body() == {"from": "start"}
+
+
+def test_every_retry_gets_its_own_key(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, retry_json()), respond(202, retry_json()))
+
+    client.runs.retry("683b")
+    client.runs.retry("683b")
+
+    first, second = (request.headers["Idempotency-Key"] for request in api.requests)
+    assert first != second
+
+
+def test_retry_with_your_own_key(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, retry_json()))
+
+    client.runs.retry("683b", idempotency_key="retry:683b")
+
+    assert api.last.headers["Idempotency-Key"] == "retry:683b"
+
+
+def test_a_retry_is_sent_again_with_the_same_key(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(httpx2.ReadTimeout("slow"), respond(202, retry_json()))
+
+    assert client.runs.retry("683b").id == "684c"
+
+    first, second = api.requests
+    assert first.headers["Idempotency-Key"] == second.headers["Idempotency-Key"]
+
+
+def test_retry_and_wait(client: Lodol, api: FakeAPI, clock: FakeClock) -> None:
+    api.queue(
+        respond(202, retry_json()),
+        respond(200, run_json(execution_id="684c", status="running")),
+        respond(200, run_json(execution_id="684c", status="success")),
+        respond(200, run_json(execution_id="684c", status="success", steps=[])),
+    )
+
+    retry = client.runs.retry("683b", wait=True, timeout=600)
+
+    assert retry.succeeded and retry.steps == []
+    assert [api.sent(i)[1] for i in range(4)] == [
+        "/executions/683b/retry",
+        "/executions/684c",
+        "/executions/684c",
+        "/executions/684c",
+    ]
+    # A retry just queued isn't checked at once.
+    assert clock.sleeps == [1.0, 1.5]
+
+
+def test_a_retry_that_fails_again_raises(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    failed = run_json(execution_id="684c", status="failed", error="Sheet not found")
+    api.queue(respond(202, retry_json()), respond(200, failed), respond(200, failed))
+
+    with pytest.raises(RunFailedError, match="Run 684c failed: Sheet not found"):
+        client.runs.retry("683b", wait=True)
+
+
+def test_a_run_that_cant_be_retried_that_way_is_a_conflict(
+    client: Lodol, api: FakeAPI
+) -> None:
+    message = (
+        "This run failed before Lodol kept where runs fail, so it can only be "
+        "retried from the start."
+    )
+    api.queue(respond(409, {"error": message, "error_code": "run_not_retryable"}))
+
+    with pytest.raises(ConflictError) as exc:
+        client.runs.retry("683b")
+
+    assert exc.value.code == "run_not_retryable"
+    assert str(exc.value) == message
+    assert len(api.requests) == 1
+
+
+def test_a_retry_timeout_needs_wait(client: Lodol, api: FakeAPI) -> None:
+    with pytest.raises(ValueError, match="needs wait=True"):
+        client.runs.retry("683b", timeout=60)
+
+    assert api.requests == []
+
+
+@pytest.mark.parametrize(
+    ("options", "complaint"),
+    [
+        ({"wait": True, "timeout": -1}, "timeout must be 0 or more"),
+        ({"idempotency_key": " "}, "idempotency_key is empty"),
+    ],
+)
+def test_a_retry_is_checked_before_anything_is_sent(
+    client: Lodol, api: FakeAPI, options: dict[str, Any], complaint: str
+) -> None:
+    with pytest.raises(ValueError, match=complaint):
+        client.runs.retry("683b", **options)
+
+    assert api.requests == []
+
+
+def test_a_workflow_is_not_a_run_to_retry(client: Lodol) -> None:
+    with pytest.raises(TypeError, match="Expected a run id or a Run, not Workflow"):
+        client.runs.retry(Workflow(id="665f", name="x"))  # type: ignore[arg-type]
+
+
+def test_a_run_says_how_it_can_be_retried(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            200,
+            run_json(
+                status="failed",
+                retry_of="682a",
+                retry_options={"from_start": True, "from_failed_step": False},
+            ),
+        )
+    )
+
+    run = client.runs.get("683b")
+
+    assert run.retry_of == "682a"
+    assert run.retry_options == RetryOptions(from_start=True, from_failed_step=False)
+
+
+# ── Waiting on a listener ────────────────────────────────────────────────
 
 
 def test_waiting_on_a_listening_workflow_returns_it(

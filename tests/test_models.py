@@ -16,6 +16,7 @@ import lodol
 from lodol import (
     Approval,
     ApprovalStatus,
+    RetryOptions,
     Run,
     RunStatus,
     WaitTimeoutError,
@@ -248,6 +249,40 @@ def test_a_run_carries_what_it_handed_back() -> None:
 def test_a_run_without_outputs_has_none() -> None:
     assert Run.from_api({"execution_id": "683b", "status": "running"}).outputs == {}
     assert Run.from_api({"execution_id": "683b", "outputs": None}).outputs == {}
+
+
+def test_a_run_says_whether_it_is_a_retry_and_how_it_can_be_retried() -> None:
+    run = Run.from_api(
+        {
+            "execution_id": "684c",
+            "status": "failed",
+            "retry_of": "683b",
+            "retry_options": {"from_start": True, "from_failed_step": True},
+        }
+    )
+
+    assert run.retry_of == "683b"
+    assert run.retry_options == RetryOptions(from_start=True, from_failed_step=True)
+    assert {run, run} == {run}
+
+
+def test_a_run_that_doesnt_say_how_it_can_be_retried() -> None:
+    # As a list gives it: neither field.
+    listed = Run.from_api({"execution_id": "683b", "status": "failed"})
+    # As a run that isn't a retry, and didn't fail, is given alone.
+    alone = Run.from_api(
+        {
+            "execution_id": "683b",
+            "status": "success",
+            "retry_of": None,
+            "retry_options": {"from_start": False, "from_failed_step": False},
+        }
+    )
+
+    assert listed.retry_of is None and listed.retry_options is None
+    assert alone.retry_of is None
+    assert alone.retry_options == RetryOptions()
+    assert RetryOptions.from_api({}) == RetryOptions(False, False)
 
 
 def test_a_listener_is_marked() -> None:

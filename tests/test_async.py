@@ -139,6 +139,34 @@ async def test_stop_returns_the_stopping_run(aclient: AsyncLodol, api: FakeAPI) 
     assert (await aclient.runs.stop("683b")).status == "stopping"
 
 
+async def test_retry(aclient: AsyncLodol, api: FakeAPI, clock: FakeClock) -> None:
+    api.queue(
+        respond(202, run_json(execution_id="684c", retry_of="683b")),
+        respond(202, run_json(execution_id="684d", retry_of="683b")),
+        respond(200, run_json(execution_id="684d", status="success")),
+        respond(200, run_json(execution_id="684d", status="success", steps=[])),
+    )
+
+    retry = await aclient.runs.retry("683b")
+    again = await aclient.runs.retry(
+        "683b", from_start=True, wait=True, idempotency_key="retry:683b"
+    )
+
+    assert retry.retry_of == "683b" and retry.status == "queued"
+    assert again.succeeded and again.steps == []
+    assert api.sent(0)[:2] == ("POST", "/executions/683b/retry")
+    assert api.body(0) == {"from": "failed_step"}
+    assert api.body(1) == {"from": "start"}
+    assert api.requests[1].headers["Idempotency-Key"] == "retry:683b"
+
+
+async def test_a_retry_timeout_needs_wait(aclient: AsyncLodol, api: FakeAPI) -> None:
+    with pytest.raises(ValueError, match="needs wait=True"):
+        await aclient.runs.retry("683b", timeout=60)
+
+    assert api.requests == []
+
+
 async def test_delete_run(aclient: AsyncLodol, api: FakeAPI) -> None:
     api.queue(respond(200, {"execution_id": "683b", "deleted": True}))
 

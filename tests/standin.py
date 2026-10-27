@@ -55,6 +55,14 @@ class StandIn:
             },
             # Starts from its own trigger: running it sets it listening.
             "9b2e": {"id": "9b2e", "name": "New invoices", "inputs": [], "outputs": []},
+            # Its accounting system is down the first time it runs; a retry
+            # gets through.
+            "5c3d": {
+                "id": "5c3d",
+                "name": "Sync invoices",
+                "inputs": [],
+                "outputs": [{"name": "synced", "type": "number", "description": ""}],
+            },
         }
         # Newest first, as the API lists them.
         self.runs: list[dict[str, Any]] = []
@@ -212,6 +220,10 @@ class Handler(BaseHTTPRequestHandler):
                         "started_runs_deleted": 0,
                     },
                 )
+            if method == "POST" and parts[2:] == ["retry"]:
+                return self._idempotent(
+                    state, raw, lambda: self._retry(state, run, raw)
+                )
             if method == "POST" and parts[2:] == ["stop"]:
                 if run["status"] in ("success", "failed", "stopped"):
                     return self._error(
@@ -331,51 +343,117 @@ class Handler(BaseHTTPRequestHandler):
                 "error": f"'{workflow['name']}' needs a value for its 'client' input.",
                 "error_code": "invalid_inputs",
             }
-        run_id = f"r{state.next_id}"
-        state.next_id += 1
-        fails = workflow_id == "7a1c"
-        listening = workflow_id == "9b2e"
-        state.runs.insert(
-            0,
-            {
-                "execution_id": run_id,
-                "workflow_id": workflow_id,
-                "version_id": "v" + workflow_id,
-                "workflow_name": workflow["name"],
-                "status": "running" if listening else "queued",
-                "created_at": "2026-10-13T09:00:00+00:00",
-                "started_at": None,
-                "completed_at": None,
-                "error": None,
-                "outputs": {},
-                "is_trigger_listener": listening,
-                "fails": fails,
-                "listening": listening,
-                "inputs": inputs,
-                "steps": [
-                    {
-                        "index": 0,
-                        "status": "failed" if fails else "completed",
-                        "result": (
-                            None if fails else f"Report for {inputs.get('client')}"
-                        ),
-                        **({"error": "Sheet not found"} if fails else {}),
-                    }
-                ],
-            },
-        )
-        state.polls[run_id] = 0
+        run = self._new_run(state, workflow_id, workflow["name"], inputs)
         started: dict[str, Any] = {
-            "execution_id": run_id,
+            "execution_id": run["execution_id"],
             "workflow_id": workflow_id,
             "version_id": "v" + workflow_id,
             "status": "queued",
             "created_at": "2026-10-13T09:00:00+00:00",
-            "is_trigger_listener": listening,
+            "is_trigger_listener": run["listening"],
         }
-        if listening:
+        if run["listening"]:
             started.update(status="running", is_trigger_workflow=True)
         return 202, started
+
+    @staticmethod
+    def _new_run(
+        state: StandIn,
+        workflow_id: str,
+        workflow_name: str,
+        inputs: dict[str, Any],
+        *,
+        retry_of: str | None = None,
+    ) -> dict[str, Any]:
+        run_id = f"r{state.next_id}"
+        state.next_id += 1
+        failure = _FAILURES.get(workflow_id)
+        if workflow_id == "5c3d" and retry_of is not None:
+            failure = None  # The accounting system is back.
+        listening = workflow_id == "9b2e"
+        run: dict[str, Any] = {
+            "execution_id": run_id,
+            "workflow_id": workflow_id,
+            "version_id": "v" + workflow_id,
+            "workflow_name": workflow_name,
+            "status": "running" if listening else "queued",
+            "created_at": "2026-10-13T09:00:00+00:00",
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+            "outputs": {},
+            "is_trigger_listener": listening,
+            "retry_of": retry_of,
+            "failure": failure,
+            # Whether, once it fails, it keeps where it failed, so it can be
+            # retried from there. A run from before runs kept it can't.
+            "kept_where_it_failed": True,
+            "listening": listening,
+            "inputs": inputs,
+            "steps": [
+                {
+                    "index": 0,
+                    "status": "failed" if failure else "completed",
+                    "result": (
+                        None if failure else f"Report for {inputs.get('client')}"
+                    ),
+                    **({"error": failure} if failure else {}),
+                }
+            ],
+        }
+        state.runs.insert(0, run)
+        state.polls[run_id] = 0
+        return run
+
+    def _retry(
+        self, state: StandIn, run: dict[str, Any], raw: bytes
+    ) -> tuple[int, Any]:
+        body = json.loads(raw) if raw.strip() else {}
+        mode = body.get("from", "failed_step")
+        if mode not in ("failed_step", "start"):
+            return 400, {"error": '"from" must be "failed_step" or "start".'}
+        offered = self._retry_options(run)
+        if not offered["from_start"]:
+            return 409, {
+                "error": "Only a run that failed can be retried.",
+                "error_code": "run_not_retryable",
+            }
+        if mode == "failed_step" and not offered["from_failed_step"]:
+            return 409, {
+                "error": "This run failed before Lodol kept where runs fail, so "
+                "it can only be retried from the start.",
+                "error_code": "run_not_retryable",
+            }
+        retry = self._new_run(
+            state,
+            run["workflow_id"],
+            run["workflow_name"],
+            run["inputs"],
+            retry_of=run["execution_id"],
+        )
+        return 202, {
+            "execution_id": retry["execution_id"],
+            "retry_of": run["execution_id"],
+            "workflow_id": retry["workflow_id"],
+            "version_id": retry["version_id"],
+            "workflow_name": retry["workflow_name"],
+            "from": mode,
+            "version": "latest",
+            "failed_step": (
+                {"error_type": "step_failed", "retryable": True}
+                if run["kept_where_it_failed"]
+                else None
+            ),
+            "status": "queued",
+        }
+
+    @staticmethod
+    def _retry_options(run: dict[str, Any]) -> dict[str, bool]:
+        retryable = run["status"] == "failed" and not run["listening"]
+        return {
+            "from_start": retryable,
+            "from_failed_step": retryable and run["kept_where_it_failed"],
+        }
 
     @staticmethod
     def _advance(state: StandIn, run: dict[str, Any]) -> None:
@@ -385,12 +463,12 @@ class Handler(BaseHTTPRequestHandler):
         if state.polls[run["execution_id"]] == 1:
             run["status"], run["started_at"] = "running", "2026-10-13T09:00:01+00:00"
         else:
-            run["status"] = "failed" if run["fails"] else "success"
+            run["status"] = "failed" if run["failure"] else "success"
             run["completed_at"] = "2026-10-13T09:00:04+00:00"
-            if run["fails"]:
-                run["error"] = "Sheet not found"
-            elif run["workflow_id"] == "665f":
-                run["outputs"] = {"total": 1250}
+            if run["failure"]:
+                run["error"] = run["failure"]
+            elif run["workflow_id"] in _OUTPUTS:
+                run["outputs"] = dict(_OUTPUTS[run["workflow_id"]])
 
     @staticmethod
     def _listed(run: dict[str, Any]) -> dict[str, Any]:
@@ -409,9 +487,9 @@ class Handler(BaseHTTPRequestHandler):
         )
         return {name: run[name] for name in fields}
 
-    @staticmethod
-    def _detail(run: dict[str, Any]) -> dict[str, Any]:
-        # As GET /executions/<id> gives a run: with what it handed back.
+    def _detail(self, run: dict[str, Any]) -> dict[str, Any]:
+        # As GET /executions/<id> gives a run: with what it handed back, and
+        # how it can be retried.
         fields = (
             "execution_id",
             "workflow_id",
@@ -424,8 +502,12 @@ class Handler(BaseHTTPRequestHandler):
             "completed_at",
             "error",
             "outputs",
+            "retry_of",
         )
-        return {name: run[name] for name in fields}
+        return {
+            **{name: run[name] for name in fields},
+            "retry_options": self._retry_options(run),
+        }
 
     @staticmethod
     def _reachable(state: StandIn, approval: dict[str, Any]) -> bool:
@@ -463,6 +545,11 @@ class Handler(BaseHTTPRequestHandler):
             }
         return 200, approval
 
+
+# Why each workflow's runs fail, for those that do.
+_FAILURES = {"7a1c": "Sheet not found", "5c3d": "The accounting system didn't answer"}
+# What each workflow's runs hand back when they succeed.
+_OUTPUTS: dict[str, dict[str, Any]] = {"665f": {"total": 1250}, "5c3d": {"synced": 12}}
 
 _FALLBACK_CODES = {
     400: "invalid_request",

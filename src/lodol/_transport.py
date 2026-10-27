@@ -128,6 +128,15 @@ def new_idempotency_key(action: str) -> str:
     return f"lodol-{action}-{uuid.uuid4()}"
 
 
+def idempotency_key_for(action: str, key: str | None) -> str:
+    """The caller's own idempotency key, checked before anything is sent, or
+    a new one for ``action`` when they gave none."""
+    if key is None:
+        return new_idempotency_key(action)
+    idempotency_key_header(key)
+    return key
+
+
 def idempotency_key_header(key: object) -> str:
     """A caller's idempotency key, as it can travel in a header.
 

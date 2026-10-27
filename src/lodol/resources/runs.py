@@ -1,4 +1,5 @@
-"""Runs: follow your workflows' runs, wait for one to finish, stop one, delete one."""
+"""Runs: follow your workflows' runs, wait for one to finish, retry, stop or
+delete one."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from lodol._transport import (
     BaseClient,
     expect_list,
     expect_object,
+    idempotency_key_for,
     new_idempotency_key,
     path_id,
 )
@@ -158,6 +160,40 @@ class Runs:
         response = self._client._send(_delete_request(object_id(run, Run, "run")))
         return _parse_deleted(response)
 
+    def retry(
+        self,
+        run: RunRef,
+        *,
+        from_start: bool = False,
+        wait: bool = False,
+        timeout: float | None = None,
+        idempotency_key: str | None = None,
+    ) -> Run:
+        """Retry a failed run, as a new run with the data it started with.
+
+        By default the retry picks up at the step that failed, without
+        running the steps before it again. ``from_start=True`` runs the
+        workflow again from the top instead. Either way it starts with the
+        failed run's data (its inputs, or the event its trigger caught), and
+        the new run's ``retry_of`` names the one it retries.
+
+        A run that can't be retried that way is refused with
+        ``ConflictError`` (code ``"run_not_retryable"``): one that didn't
+        fail, one a run calling its workflow started (retry that run
+        instead), or, from the failed step, one that failed before Lodol kept
+        where runs fail (retry it from the start). ``runs.get(run)`` says
+        which retries a run offers, in ``retry_options``.
+
+        ``wait``, ``timeout`` and ``idempotency_key`` work as they do for
+        ``workflows.run``: by default this returns as soon as the retry is
+        queued, and a retried request never starts a second retry.
+        """
+        request = _retry_request(run, from_start, wait, timeout, idempotency_key)
+        retry = _parse_retry(self._client._send(request))
+        if not wait:
+            return retry
+        return self.wait(retry, timeout=timeout)
+
 
 class AsyncRuns:
     """The runs of the workspace's workflows."""
@@ -267,6 +303,40 @@ class AsyncRuns:
         """
         response = await self._client._send(_delete_request(object_id(run, Run, "run")))
         return _parse_deleted(response)
+
+    async def retry(
+        self,
+        run: RunRef,
+        *,
+        from_start: bool = False,
+        wait: bool = False,
+        timeout: float | None = None,
+        idempotency_key: str | None = None,
+    ) -> Run:
+        """Retry a failed run, as a new run with the data it started with.
+
+        By default the retry picks up at the step that failed, without
+        running the steps before it again. ``from_start=True`` runs the
+        workflow again from the top instead. Either way it starts with the
+        failed run's data (its inputs, or the event its trigger caught), and
+        the new run's ``retry_of`` names the one it retries.
+
+        A run that can't be retried that way is refused with
+        ``ConflictError`` (code ``"run_not_retryable"``): one that didn't
+        fail, one a run calling its workflow started (retry that run
+        instead), or, from the failed step, one that failed before Lodol kept
+        where runs fail (retry it from the start). ``runs.get(run)`` says
+        which retries a run offers, in ``retry_options``.
+
+        ``wait``, ``timeout`` and ``idempotency_key`` work as they do for
+        ``workflows.run``: by default this returns as soon as the retry is
+        queued, and a retried request never starts a second retry.
+        """
+        request = _retry_request(run, from_start, wait, timeout, idempotency_key)
+        retry = _parse_retry(await self._client._send(request))
+        if not wait:
+            return retry
+        return await self.wait(retry, timeout=timeout)
 
 
 class _Waiting:
@@ -464,6 +534,16 @@ def warn_listening(run: Run, *, stacklevel: int) -> None:
     )
 
 
+def check_wait_options(wait: bool, timeout: float | None) -> None:
+    """The ``wait`` and ``timeout`` of a call that starts a run, checked
+    before anything is sent."""
+    if timeout is not None and not wait:
+        raise ValueError(
+            "timeout is how long to wait for the run to finish, so it needs wait=True"
+        )
+    check_wait_timeout(timeout)
+
+
 def check_wait_timeout(timeout: float | None) -> float | None:
     """A wait's ``timeout``, checked before anything is sent."""
     if timeout is None:
@@ -540,6 +620,29 @@ def _stop_request(run_id: str) -> APIRequest:
         "POST",
         f"/executions/{path_id(run_id)}/stop",
         idempotency_key=new_idempotency_key("run-stop"),
+    )
+
+
+def _retry_request(
+    run: RunRef,
+    from_start: bool,
+    wait: bool,
+    timeout: float | None,
+    idempotency_key: str | None,
+) -> APIRequest:
+    run_id = object_id(run, Run, "run")
+    check_wait_options(wait, timeout)
+    return APIRequest(
+        "POST",
+        f"/executions/{path_id(run_id)}/retry",
+        body={"from": "start" if from_start else "failed_step"},
+        idempotency_key=idempotency_key_for("run-retry", idempotency_key),
+    )
+
+
+def _parse_retry(response: APIResponse) -> Run:
+    return Run.from_api(
+        expect_object(response, "POST /executions/{execution_id}/retry")
     )
 
 

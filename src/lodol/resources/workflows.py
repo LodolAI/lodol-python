@@ -10,13 +10,12 @@ from lodol._transport import (
     encode_json,
     expect_list,
     expect_object,
-    idempotency_key_header,
-    new_idempotency_key,
+    idempotency_key_for,
     path_id,
 )
 from lodol.models import DeletedWorkflow, Run, Workflow
 from lodol.resources._common import object_id
-from lodol.resources.runs import check_wait_timeout, warn_listening
+from lodol.resources.runs import check_wait_options, warn_listening
 
 if TYPE_CHECKING:  # pragma: no cover - only for type hints
     from lodol.client import AsyncLodol, Lodol
@@ -204,11 +203,7 @@ def _run_request(
     idempotency_key: str | None,
 ) -> APIRequest:
     workflow_id = object_id(workflow, Workflow, "workflow")
-    if timeout is not None and not wait:
-        raise ValueError(
-            "timeout is how long to wait for the run to finish, so it needs wait=True"
-        )
-    check_wait_timeout(timeout)
+    check_wait_options(wait, timeout)
     body = None
     if inputs is not None:
         if not isinstance(inputs, Mapping):
@@ -226,15 +221,11 @@ def _run_request(
             except (TypeError, ValueError) as exc:
                 raise TypeError(f"Input {name!r}: {exc}") from None
         body = {"inputs": dict(inputs)}
-    if idempotency_key is None:
-        idempotency_key = new_idempotency_key("workflow-run")
-    else:
-        idempotency_key_header(idempotency_key)
     return APIRequest(
         "POST",
         f"/workflows/{path_id(workflow_id)}/run-async",
         body=body,
-        idempotency_key=idempotency_key,
+        idempotency_key=idempotency_key_for("workflow-run", idempotency_key),
     )
 
 

@@ -13,6 +13,7 @@ from lodol import (
     ConflictError,
     Lodol,
     NotFoundError,
+    RetryOptions,
     RunFailedError,
     UnprocessableEntityError,
 )
@@ -203,6 +204,47 @@ def test_a_run_hands_back_its_outputs(server: Server) -> None:
     assert run.outputs == {"total": 1250}
     # A list is a summary; the run itself has what it handed back.
     assert listed.outputs == {}
+
+
+def test_retrying_a_failed_run(server: Server) -> None:
+    with Lodol(api_key=KEY, base_url=address(server)) as lodol:
+        with pytest.raises(RunFailedError) as failed:
+            lodol.workflows.run("5c3d", wait=True)
+        original = failed.value.run
+        assert original.error == "The accounting system didn't answer"
+        assert original.retry_options == RetryOptions(True, True)
+
+        retry = lodol.runs.retry(original, wait=True)
+
+        assert retry.succeeded and retry.outputs == {"synced": 12}
+        assert retry.retry_of == original.id
+        assert retry.retry_options == RetryOptions(False, False)
+        # A list doesn't say.
+        listed = {run.id: run for run in lodol.runs.list()}
+        assert listed[retry.id].retry_of is None
+        assert listed[retry.id].retry_options is None
+
+        # A run that succeeded can't be retried.
+        with pytest.raises(ConflictError) as refused:
+            lodol.runs.retry(retry)
+        assert refused.value.code == "run_not_retryable"
+
+        # A run from before runs kept where they failed, only from the start.
+        with pytest.raises(RunFailedError) as failed:
+            lodol.workflows.run("7a1c", wait=True)
+        server.state.runs[0]["kept_where_it_failed"] = False
+        assert lodol.runs.get(failed.value.run).retry_options == RetryOptions(
+            from_start=True, from_failed_step=False
+        )
+        with pytest.raises(ConflictError, match="only be retried from the start"):
+            lodol.runs.retry(failed.value.run)
+        again = lodol.runs.retry(failed.value.run, from_start=True)
+        assert again.status == "queued" and again.retry_of == failed.value.run.id
+
+        # The same key starts one retry, however often it's asked.
+        first = lodol.runs.retry(original, idempotency_key="retry-once")
+        second = lodol.runs.retry(original, idempotency_key="retry-once")
+        assert first.id == second.id
 
 
 def test_an_error_names_its_request(server: Server) -> None:

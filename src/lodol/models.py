@@ -221,6 +221,28 @@ class Step:
 
 
 @dataclass(frozen=True)
+class RetryOptions:
+    """Which retries a run offers (see ``runs.retry``). A run that didn't
+    fail offers neither."""
+
+    from_start: bool = False
+    """Whether it can be run again from the top, with the data it started
+    with. Any failed run can, except one a run calling its workflow started:
+    retry that run instead."""
+    from_failed_step: bool = False
+    """Whether it can pick up at the step that failed, without running the
+    steps before it again. A run that failed before Lodol kept where runs
+    fail can't."""
+
+    @classmethod
+    def from_api(cls, data: Mapping[str, Any]) -> RetryOptions:
+        return cls(
+            from_start=bool(data.get("from_start")),
+            from_failed_step=bool(data.get("from_failed_step")),
+        )
+
+
+@dataclass(frozen=True)
 class Run:
     """One run of a workflow.
 
@@ -248,6 +270,13 @@ class Run:
     schedule, listening. It never finishes on its own: each event it catches
     starts a run of its own, listed with the rest. Its status reads
     ``"running"`` while it listens."""
+    retry_of: str | None = None
+    """The id of the run this one retried, when it is a retry. ``None``
+    otherwise, and in ``runs.list``, which doesn't say."""
+    retry_options: RetryOptions | None = None
+    """Which retries this run offers, if it failed. ``None`` when the
+    response didn't say: ``runs.get`` and ``runs.wait`` say, ``runs.list``
+    doesn't."""
     created_at: dt.datetime | None = None
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
@@ -269,6 +298,7 @@ class Run:
         raw = dict(data)
         steps = raw.get("steps")
         outputs = raw.get("outputs")
+        retry_options = raw.get("retry_options")
         return cls(
             id=str(raw.get("execution_id") or raw.get("id") or ""),
             status=str(raw.get("status") or ""),
@@ -278,6 +308,12 @@ class Run:
             error=_optional_str(raw.get("error")),
             outputs=dict(outputs) if isinstance(outputs, Mapping) else {},
             is_trigger_listener=bool(raw.get("is_trigger_listener")),
+            retry_of=_optional_str(raw.get("retry_of")),
+            retry_options=(
+                RetryOptions.from_api(retry_options)
+                if isinstance(retry_options, Mapping)
+                else None
+            ),
             created_at=parse_datetime(raw.get("created_at")),
             started_at=parse_datetime(raw.get("started_at")),
             completed_at=parse_datetime(raw.get("completed_at")),
