@@ -43,7 +43,7 @@ run = lodol.workflows.run(workflow, inputs={"client": "Acme", "month": "2026-05"
 print(run.id, run.status)  # "683b...", "queued"
 ```
 
-Without `wait=True`, `run` returns as soon as the run is queued. A workflow's `id` stays the same when it's edited, so it's safe to store.
+Without `wait=True`, `run` returns as soon as the run is queued. A run started while the workspace already has as many going as its plan allows comes back `queued` too, and starts when one of them finishes. A workflow's `id` stays the same when it's edited, so it's safe to store.
 
 **Inputs** are given by name and converted to each input's type, so `"21"` reaches a number input as `21`, and an optional input you leave out takes its default. Dates, times and `Decimal`s are sent as text Lodol reads (`date(2026, 5, 1)` becomes `"2026-05-01"`). An input the workflow doesn't declare, a missing required one, or a value of the wrong type raises `BadRequestError` naming the input, and nothing runs.
 
@@ -59,7 +59,7 @@ lodol.workflows.run(
 
 Within 24 hours, the same key with the same inputs returns the run it already started, even if the first attempt is still under way. The same key with different inputs raises `UnprocessableEntityError`. Any text up to 256 characters works as a key.
 
-**Workflows that start themselves.** A workflow that starts from its own trigger or schedule doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own, which `runs.list` lists. The listening run has `run.is_trigger_listener` set, and its status reads `"running"` for as long as it listens. Waiting on it, with `wait=True` or `runs.wait`, returns it at once, with a warning, since there's no end to wait for.
+**Workflows that start themselves.** A workflow that starts from its own trigger or schedule, which `workflow.starts_from_trigger` says, doesn't run to an end: running it sets it listening, and each event it catches starts a run of its own, which `runs.list` lists. The listening run has `run.is_trigger_listener` set, and its status reads `"running"` for as long as it listens. Waiting on it, with `wait=True` or `runs.wait`, returns it at once, with a warning, since there's no end to wait for.
 
 ## Wait for a run
 
@@ -82,6 +82,27 @@ else:
 
 The finished run comes with its outputs (`run.outputs`) and its step results (`run.steps`). An output the run never set is `None`. `RunFailedError` carries the run too, as `error.run`, so you can see which step failed. If the run has finished but its step results can't be fetched in time, you get the run without them rather than an error. Without a `timeout`, `wait` waits as long as the run takes, including while it waits for someone to answer an approval.
 
+Each step's `status` is one of `StepStatus`: `"completed"`, `"failed"`, `"continued"` (it failed, but its setting let the run carry on; `step.error` says what went wrong) or `"skipped"` (it's turned off, so it has no result, and `step.reason` says so). A step that retried says how many tries it took in `step.attempts`.
+
+## Retry a failed run
+
+```python
+from lodol import RunFailedError
+
+try:
+    run = lodol.workflows.run("5c3d...", wait=True)
+except RunFailedError as error:
+    print(error.run.error)  # "The accounting system didn't answer"
+    # Once it's back, pick up at the step that failed:
+    run = lodol.runs.retry(error.run, wait=True)
+
+print(run.outputs)  # {"synced": 12}
+```
+
+A retry is a new run, with the data the failed one started with (its inputs, or the event its trigger caught), and its `retry_of` is the failed run's `id`. By default it picks up at the step that failed, without running the steps before it again, so what they did (an email sent, a row added) isn't done twice. If the workflow has been edited since, the retry runs it as it is now when the steps before the one that failed are unchanged, so a fix to that step is picked up. `from_start=True` runs the whole workflow again instead. `wait`, `timeout` and `idempotency_key` work as they do for `workflows.run`.
+
+`runs.get(run).retry_options` says which retries a failed run offers. A run that didn't fail can't be retried, nor can one a run calling its workflow started (retry that run instead), and one that failed before Lodol kept where runs fail can only be retried from the start. Asking for a retry a run doesn't offer raises `ConflictError` with `code` `"run_not_retryable"`.
+
 ## Follow runs
 
 ```python
@@ -92,13 +113,22 @@ for run in lodol.runs.list(workflow="665f...", limit=20):
 Runs come newest first. Loop over the result and pages are fetched as you go, so stopping early costs nothing extra. Leave out `limit` to go through all of them, and `workflow` to see every workflow's runs. Listed runs leave out `outputs` and `steps`; `runs.get` has them. A failed run says why in `run.error`, listed or not.
 
 ```python
+from datetime import date
+
+for run in lodol.runs.list(status="failed", started_from=date(2026, 10, 1)):
+    print(run.started_at, run.workflow_name, run.error)
+```
+
+`status` takes one status or several (`status=["failed", "stopped"]`). `started_from` and `started_to` bound when runs started, `started_to` itself left out: a `date` is the start of that day, UTC, and a `datetime` without a timezone is taken as UTC. `search` finds runs by their workflow's name or a value in their data, such as a client's name in their inputs. A status runs can't be listed by, such as a typo, raises `ValueError` before anything is sent, rather than quietly listing every run.
+
+```python
 run = lodol.runs.get("683b...", include_steps=True)
 lodol.runs.stop(run)
 ```
 
 `run.workflow_id` is the workflow's `id`. `run.version_id` is the version of the workflow that ran, which changes as the workflow is edited. Times are timezone-aware `datetime`s.
 
-Stopping a run doesn't undo the steps it already finished. If the run had already finished, `stop` returns it as it finished rather than raising.
+Stopping a run doesn't undo the steps it already finished. `stop` returns the run, as `runs.get` would, with status `"stopping"` while it finishes the step it's on, or `"stopped"`. If the run had already finished, `stop` returns it as it finished rather than raising.
 
 ```python
 run = lodol.runs.get("683b...")
@@ -113,6 +143,22 @@ Deleting a run removes it from the history, as deleting it in Lodol does, along 
 A workflow's **Request approval** step pauses its run until someone answers. Your own system can answer instead of a person in Lodol:
 
 ```python
+run = lodol.workflows.run("4e8d...")
+
+approval = lodol.approvals.wait_for(run)  # until the run asks
+if approval is not None:
+    print(approval.title)  # "Pay invoice #4471?"
+    lodol.approvals.approve(approval, comment="Matches the purchase order")
+
+run = lodol.runs.wait(run)
+print(run.outputs)  # {"paid": True}
+```
+
+`wait_for` waits until the run asks for an answer and returns the request it's waiting on, or `None` if the run succeeds without asking. It paces itself as `runs.wait` does, raises `RunFailedError` if the run fails or is stopped first, and takes a `timeout` too. A run can ask more than once: call `wait_for` again after each answer. A workflow that starts from its own trigger never asks itself, since the runs its events start do, so `wait_for` returns `None` for it at once, with a warning.
+
+To answer whatever is waiting, from any run:
+
+```python
 for approval in lodol.approvals.list():  # pending ones, newest first
     print(approval.title, approval.details, approval.workflow_name)
 
@@ -123,7 +169,9 @@ for approval in lodol.approvals.list():  # pending ones, newest first
         # or lodol.approvals.reject(approval, comment="Wrong amount")
 ```
 
-The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. If someone else answered first, or the request expired, you get `ConflictError`. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how.
+The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how. `approvals.list(run=...)` lists one run's requests, and `workflow=` one workflow's.
+
+A request that's no longer pending can't be answered: you get `ConflictError`, whose `code` says what happened to it. `"approval_already_answered"`: someone answered it first. `"approval_expired"`: nobody answered in time, so it closed, or the step's time limit decided it automatically. `"approval_withdrawn"`: the run was stopped, or its workflow deleted, before anyone answered.
 
 ## Workflows
 
@@ -138,6 +186,43 @@ Deleting removes the workflow and every version of it, as deleting it in Lodol d
 
 A delete is never sent twice. If it times out, check with `lodol.workflows.get(...)` before trying again, since it may have happened.
 
+## Create and change workflows
+
+```python
+program = {
+    "kind": "Program",
+    "version": 1,
+    "body": [
+        {
+            "kind": "ExprStmt",
+            "expr": {
+                "kind": "DisplayBuiltIn",
+                "value": {"kind": "Literal", "value": "Hello from Lodol"},
+            },
+        }
+    ],
+}
+
+check = lodol.workflows.validate(program)  # saves nothing
+if not check.valid:
+    raise ValueError(check.error)
+
+workflow = lodol.workflows.create("Say hello", program, description="A first workflow")
+print(workflow.url)  # where to open it in Lodol
+
+workflow = lodol.workflows.edit(
+    workflow,
+    [{"op": "replace", "path": "/body/0/expr/value/value", "value": "Hello again"}],
+)
+workflow = lodol.workflows.update(workflow, name="Say hello again")
+```
+
+A workflow's steps are its `program`, the same structure `workflows.get(...).program` gives you. `validate` checks one without saving it: `check.error` says what to fix, and for a valid program, `check.warnings` names likely mistakes. It checks the program, not what the key's member may use (connections, and the workflows it calls), so a program that passes can still be refused when saved. `create` saves a new workflow, published, and private to the key's member until they share it in Lodol. It doesn't run it. A program Lodol can't save raises `BadRequestError` with `code` `"invalid_workflow"`, and nothing is saved.
+
+`update` replaces a workflow's `program`, `name` or `description`, leaving the rest as it is, and `edit` changes its program with JSON Patch operations (`"replace"`, `"add"` or `"remove"`), applied in order to the program as it is now. Each is saved as an edit in Lodol is: as a new version, or, when the workflow was saved within the last few minutes, over that version; `workflow.version_id` names the version saved. Saving pauses the trigger of a workflow that was listening, and `workflow.trigger_paused` says so: run it again to set it listening on the new version. After any save, `workflow.apps_to_connect` names the apps it uses that the key's member has yet to connect in Lodol, which it can't run without.
+
+These need a key with the **Create and edit workflows** scope (`workflows:write`), which is ticked by default, made by a member allowed to create or edit workflows. A save is never made twice: a retried request gets back the workflow the first one saved.
+
 ## Errors
 
 When Lodol or the network says no, the SDK raises a `LodolError`. Errors from the API carry Lodol's own explanation as their message, and `code`, a stable name for what went wrong (such as `"run_already_finished"`): decide what to do from `code`, since the wording may change. `request_id` names the request; it's also in the error's text, so quote that when you contact Lodol's support. A call that can't be made as written (inputs that aren't a dict, a timeout that isn't a number) raises `TypeError` or `ValueError` before anything is sent.
@@ -150,16 +235,15 @@ When Lodol or the network says no, the SDK raises a `LodolError`. Errors from th
 | `AuthenticationError` | The key is missing, wrong, revoked or expired | Check `LODOL_API_KEY` |
 | `PermissionDeniedError` | The key's scopes, or its creator's role, don't allow this | Give the key the scope, or use another key |
 | `NotFoundError` | No such workflow, run or approval in this workspace | Check the id |
-| `ConflictError` | An approval was already answered; or Lodol was still working on an earlier attempt of a request after five minutes | For an approval, nothing. Otherwise check before trying again: the message has the key to retry with |
-| `ConcurrencyLimitError` | Your plan's runs-at-once limit is reached | Wait for a run to finish, then start another |
+| `ConflictError` | An approval was already answered, expired or was withdrawn (`code` says which); or Lodol was still working on an earlier attempt of a request after five minutes | For an approval, nothing. Otherwise check before trying again: the message has the key to retry with |
 | `RunLimitError` | This month's runs are used up | Runs come back at `error.resets_at` |
 | `RateLimitError` | Too many requests, for longer than the SDK waits on its own | Wait `error.retry_after` seconds |
 | `APIConnectionError`, `APITimeoutError` | Lodol couldn't be reached, didn't answer, or had a certificate that couldn't be verified | Try again later; for a certificate, see the message |
 
 ## What happens automatically
 
-- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads; runs, stops and approval answers, which carry an idempotency key; and anything a rate limit refused, since Lodol refuses before doing anything. A delete that fails otherwise, and limits that last longer, are reported at once.
-- **Idempotency keys.** Every run, stop and approval answer gets one, so a retry can never start a second run or answer twice. If a retry finds Lodol still working on the first attempt, it waits for that, up to five minutes, rather than starting again.
+- **Retries.** A request that fails for a passing reason (a dropped connection, a server error, a rate limit that clears within a minute) is sent again, up to `max_retries` times, with growing pauses. Only requests that can't take effect twice are retried: reads, and checking a workflow; runs, run retries, stops, approval answers and workflow saves, which carry an idempotency key; and anything a rate limit refused, since Lodol refuses before doing anything. A delete that fails otherwise, and limits that last longer, are reported at once.
+- **Idempotency keys.** Every run, run retry, stop, approval answer and workflow save gets one, so a retry can never start a second run, answer twice or save twice. If a retry finds Lodol still working on the first attempt, it waits for that, up to five minutes, rather than starting again.
 - **Timeouts.** Each request may take 30 seconds (`timeout`). Waiting for a run has its own `timeout`.
 - **Security.** Your key is only sent over HTTPS, except to Lodol Local on your own machine, which is reached directly, never through a proxy. It never appears in logs or reprs.
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+
 import httpx2
 import pytest
 
@@ -9,15 +11,17 @@ from lodol import (
     APIConnectionError,
     AsyncLodol,
     BadRequestError,
-    ConcurrencyLimitError,
     ConflictError,
     DeletedRun,
     DeletedWorkflow,
     InternalServerError,
     RunFailedError,
+    RunLimitError,
     WaitTimeoutError,
+    Workflow,
 )
 from tests.conftest import (
+    ApprovalsServer,
     FakeAPI,
     FakeClock,
     approval_json,
@@ -43,6 +47,51 @@ async def test_workflows(aclient: AsyncLodol, api: FakeAPI) -> None:
     assert detailed.program == {"body": []}
     assert deleted == DeletedWorkflow(id="665f", name="Monthly report")
     assert [api.sent(i)[0] for i in range(3)] == ["GET", "GET", "DELETE"]
+
+
+async def test_creating_and_changing_workflows(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    program = {"kind": "Program", "version": 1, "body": []}
+    saved = workflow_json(program=program, version_id="6690", apps_to_connect=[])
+    api.queue(
+        respond(200, {"valid": True, "actions": [], "has_trigger": False}),
+        respond(201, saved),
+        respond(200, {**saved, "name": "Renamed", "trigger_paused": False}),
+        respond(200, {**saved, "trigger_paused": True}),
+    )
+
+    check = await aclient.workflows.validate(program)
+    created = await aclient.workflows.create("Monthly report", program)
+    renamed = await aclient.workflows.update(created, name="Renamed")
+    edited = await aclient.workflows.edit(
+        created, [{"op": "add", "path": "/body/-", "value": {}}]
+    )
+
+    assert check.valid and created.version_id == "6690"
+    assert renamed.name == "Renamed" and edited.trigger_paused is True
+    assert [api.sent(i)[:2] for i in range(4)] == [
+        ("POST", "/workflows/validate"),
+        ("POST", "/workflows"),
+        ("PUT", "/workflows/665f"),
+        ("PATCH", "/workflows/665f"),
+    ]
+    assert api.body(3) == {
+        "operations": [{"op": "add", "path": "/body/-", "value": {}}]
+    }
+    keys = [api.requests[i].headers.get("Idempotency-Key", "") for i in range(4)]
+    assert keys[0] == "" and all(key.startswith("lodol-workflow-") for key in keys[1:])
+
+
+async def test_a_save_is_checked_before_anything_is_sent(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    with pytest.raises(ValueError, match="Nothing to change"):
+        await aclient.workflows.update("665f")
+    with pytest.raises(ValueError, match="operations is empty"):
+        await aclient.workflows.edit("665f", [])
+
+    assert api.requests == []
 
 
 async def test_run_and_wait(
@@ -109,6 +158,32 @@ async def test_list_pages_with_async_for(aclient: AsyncLodol, api: FakeAPI) -> N
     assert api.sent(1)[2] == {"limit": "100", "workflow_id": "665f", "after": "r99"}
 
 
+async def test_list_with_filters(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"executions": [run_json(execution_id="r1")]}))
+
+    runs = aclient.runs.list(
+        status=["failed", "stopped"],
+        started_from=dt.date(2026, 10, 1),
+        started_to=dt.datetime(2026, 11, 1),
+        search="Acme",
+    )
+
+    assert [run.id async for run in runs] == ["r1"]
+    params = api.last.url.params
+    assert params.get_list("status") == ["failed", "stopped"]
+    assert (params["from"], params["to"]) == ("2026-10-01", "2026-11-01T00:00:00")
+    assert params["search"] == "Acme"
+
+
+async def test_a_bad_filter_is_refused_before_anything_is_sent(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    with pytest.raises(ValueError, match="'faild' isn't a status"):
+        aclient.runs.list(status="faild")
+
+    assert api.requests == []
+
+
 async def test_list_with_a_limit(aclient: AsyncLodol, api: FakeAPI) -> None:
     api.queue(respond(200, {"executions": [run_json(execution_id="r1")]}))
 
@@ -133,9 +208,50 @@ async def test_stop(aclient: AsyncLodol, api: FakeAPI) -> None:
 
 
 async def test_stop_returns_the_stopping_run(aclient: AsyncLodol, api: FakeAPI) -> None:
-    api.queue(respond(200, {"execution_id": "683b", "status": "stopping"}))
+    api.queue(
+        respond(
+            200,
+            run_json(
+                status="stopped",
+                workflow_name="Monthly report",
+                completed_at="2026-10-13T09:00:05+00:00",
+                retry_options={"from_start": False, "from_failed_step": False},
+            ),
+        )
+    )
 
-    assert (await aclient.runs.stop("683b")).status == "stopping"
+    run = await aclient.runs.stop("683b")
+
+    assert run.status == "stopped" and run.workflow_name == "Monthly report"
+    assert run.completed_at is not None and run.retry_options is not None
+
+
+async def test_retry(aclient: AsyncLodol, api: FakeAPI, clock: FakeClock) -> None:
+    api.queue(
+        respond(202, run_json(execution_id="684c", retry_of="683b")),
+        respond(202, run_json(execution_id="684d", retry_of="683b")),
+        respond(200, run_json(execution_id="684d", status="success")),
+        respond(200, run_json(execution_id="684d", status="success", steps=[])),
+    )
+
+    retry = await aclient.runs.retry("683b")
+    again = await aclient.runs.retry(
+        "683b", from_start=True, wait=True, idempotency_key="retry:683b"
+    )
+
+    assert retry.retry_of == "683b" and retry.status == "queued"
+    assert again.succeeded and again.steps == []
+    assert api.sent(0)[:2] == ("POST", "/executions/683b/retry")
+    assert api.body(0) == {"from": "failed_step"}
+    assert api.body(1) == {"from": "start"}
+    assert api.requests[1].headers["Idempotency-Key"] == "retry:683b"
+
+
+async def test_a_retry_timeout_needs_wait(aclient: AsyncLodol, api: FakeAPI) -> None:
+    with pytest.raises(ValueError, match="needs wait=True"):
+        await aclient.runs.retry("683b", timeout=60)
+
+    assert api.requests == []
 
 
 async def test_delete_run(aclient: AsyncLodol, api: FakeAPI) -> None:
@@ -168,6 +284,74 @@ async def test_approvals(aclient: AsyncLodol, api: FakeAPI) -> None:
     assert api.body(3) == {"reply": "4471"}
 
 
+async def test_approvals_page_past_what_the_key_cant_see(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    server = ApprovalsServer(
+        [
+            approval_json(id="a4"),
+            approval_json(id="a3", workflow_id="7a1c"),
+            approval_json(id="a2", workflow_id="7a1c"),
+            approval_json(id="a1"),
+        ],
+        hidden_workflows={"7a1c"},
+    )
+    api.queue(*[server] * 3)
+
+    ids = [approval.id async for approval in aclient.approvals.list(limit=2)]
+
+    # The second page read only a2, which the key can't see.
+    assert ids == ["a4", "a1"]
+    assert len(api.requests) == 3
+
+
+async def test_wait_for_an_approval(
+    aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(
+        respond(200, run_json(status="awaiting_approval")),
+        respond(200, {"approvals": [], "next_before": None}),
+        respond(200, run_json(status="awaiting_approval")),
+        respond(200, {"approvals": [approval_json()], "next_before": None}),
+        respond(200, {"approvals": [approval_json()], "next_before": None}),
+        respond(200, run_json(status="success")),
+    )
+
+    approval = await aclient.approvals.wait_for("683b", timeout=60)
+    listed = [a async for a in aclient.approvals.list(run="683b", workflow="665f")]
+    after = await aclient.approvals.wait_for("683b")
+
+    assert approval is not None and approval.id == "a1"
+    assert [a.id for a in listed] == ["a1"]
+    assert api.sent(4)[2] == {
+        "status": "pending",
+        "execution_id": "683b",
+        "workflow_id": "665f",
+        "limit": "100",
+    }
+    assert after is None
+    assert clock.sleeps == [1.0]
+
+
+async def test_wait_for_a_run_that_fails(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(200, run_json(status="failed", error="Bad address")),
+        respond(200, run_json(status="failed", error="Bad address", steps=[])),
+    )
+
+    with pytest.raises(RunFailedError, match="Bad address"):
+        await aclient.approvals.wait_for("683b")
+
+
+async def test_wait_for_a_listening_workflow(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(respond(200, run_json(status="running", is_trigger_listener=True)))
+
+    with pytest.warns(UserWarning, match="it is listening") as warned:
+        assert await aclient.approvals.wait_for("683b") is None
+
+    assert warned[0].filename == __file__
+
+
 async def test_retries_sleep_without_blocking(
     aclient: AsyncLodol, api: FakeAPI, clock: FakeClock
 ) -> None:
@@ -182,9 +366,9 @@ async def test_retries_sleep_without_blocking(
 
 
 async def test_errors_match_the_sync_client(aclient: AsyncLodol, api: FakeAPI) -> None:
-    api.queue(respond(429, {"error": "Too many", "error_code": "concurrency_limit"}))
+    api.queue(respond(429, {"error": "Out of runs", "error_code": "monthly_run_limit"}))
 
-    with pytest.raises(ConcurrencyLimitError):
+    with pytest.raises(RunLimitError):
         await aclient.workflows.run("665f")
 
 
@@ -281,6 +465,17 @@ async def test_a_workflow_that_starts_itself_isnt_waited_for(
         run = await aclient.workflows.run("665f", wait=True)
 
     assert run.status == "running" and len(api.requests) == 1
+
+
+async def test_the_listening_warning_names_the_workflow(
+    aclient: AsyncLodol, api: FakeAPI
+) -> None:
+    api.queue(respond(202, run_json(status="running", is_trigger_listener=True)))
+
+    with pytest.warns(UserWarning, match="'New invoices' starts from its own") as w:
+        await aclient.workflows.run(Workflow(id="9b2e", name="New invoices"), wait=True)
+
+    assert w[0].filename == __file__
 
 
 async def test_waiting_on_a_listening_workflow_returns_it(

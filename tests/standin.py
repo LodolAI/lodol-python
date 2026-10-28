@@ -8,6 +8,8 @@ answer replayed; reused for something else: 422).
 
 from __future__ import annotations
 
+import copy
+import datetime as dt
 import hashlib
 import itertools
 import json
@@ -54,7 +56,30 @@ class StandIn:
                 "outputs": [],
             },
             # Starts from its own trigger: running it sets it listening.
-            "9b2e": {"id": "9b2e", "name": "New invoices", "inputs": [], "outputs": []},
+            "9b2e": {
+                "id": "9b2e",
+                "name": "New invoices",
+                "inputs": [],
+                "outputs": [],
+                "starts_from_trigger": True,
+            },
+            # Its runs ask for approval before they pay, once for each of
+            # "asks", and say whether they paid.
+            "4e8d": {
+                "id": "4e8d",
+                "name": "Pay invoice",
+                "inputs": [],
+                "outputs": [{"name": "paid", "type": "boolean", "description": ""}],
+                "asks": ["Pay invoice #4471?"],
+            },
+            # Its accounting system is down the first time it runs; a retry
+            # gets through.
+            "5c3d": {
+                "id": "5c3d",
+                "name": "Sync invoices",
+                "inputs": [],
+                "outputs": [{"name": "synced", "type": "number", "description": ""}],
+            },
         }
         # Newest first, as the API lists them.
         self.runs: list[dict[str, Any]] = []
@@ -78,6 +103,26 @@ class StandIn:
                 "workflow_id": "665f",
             },
         ]
+        # Workflows the key's member can't see: their approval requests are
+        # left out after a page is read, as the server leaves them out.
+        self.hidden_workflows: set[str] = set()
+        # False for an older Lodol, which lists approval requests from every
+        # run and workflow whatever execution_id and workflow_id say.
+        self.filters_approvals = True
+        self.next_approval_id = 3
+        # What the key may do. Without workflows:write it can't create or
+        # change workflows.
+        self.scopes = {
+            "workflows:read",
+            "workflows:write",
+            "workflows:execute",
+            "workflows:delete",
+            "executions:read",
+            "executions:delete",
+        }
+        # The apps the key's member has connected in Lodol.
+        self.connected_apps = {"slack"}
+        self.next_workflow_id = 1
         self.headers_seen: list[dict[str, str]] = []
         self.slow_seconds = 0.0
         # How long starting a run takes, during which a retry under the same
@@ -91,6 +136,8 @@ class StandIn:
 
 class Handler(BaseHTTPRequestHandler):
     server: Server
+    # Every value of each query parameter, for those that repeat.
+    query_lists: dict[str, list[str]]
 
     def log_message(self, *_args: Any) -> None:  # keep test output clean
         pass
@@ -140,13 +187,14 @@ class Handler(BaseHTTPRequestHandler):
             )
         url = urlsplit(self.path)
         parts = [p for p in url.path.split("/") if p][2:]  # drop "api", "v1"
-        query = {k: v[0] for k, v in parse_qs(url.query).items()}
+        self.query_lists = parse_qs(url.query)
+        query = {k: v[0] for k, v in self.query_lists.items()}
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         with state.lock:
             self._route(state, self.command, parts, query, raw)
 
-    do_GET = do_POST = do_DELETE = _handle
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
 
     # ── the API ──
 
@@ -159,14 +207,37 @@ class Handler(BaseHTTPRequestHandler):
         raw: bytes,
     ) -> None:
         if method == "GET" and parts == ["workflows"]:
-            return self._reply(200, {"workflows": list(state.workflows.values())})
+            return self._reply(
+                200, {"workflows": [_shown(w) for w in state.workflows.values()]}
+            )
+        if method == "POST" and parts == ["workflows", "validate"]:
+            if self._may_write(state):
+                self._reply(*self._validate(raw))
+            return None
+        if method == "POST" and parts == ["workflows"]:
+            if self._may_write(state):
+                self._idempotent(state, raw, lambda: self._create(state, raw))
+            return None
+        if (
+            method in ("PUT", "PATCH")
+            and parts[:1] == ["workflows"]
+            and len(parts) == 2
+        ):
+            if self._may_write(state):
+                self._idempotent(
+                    state, raw, lambda: self._change(state, method, parts[1], raw)
+                )
+            return None
         if parts[:1] == ["workflows"] and len(parts) == 2:
             workflow = state.workflows.get(parts[1])
             if workflow is None:
                 return self._error(404, "Workflow not found")
             if method == "GET":
-                return self._reply(200, {**workflow, "program": {"kind": "Program"}})
+                return self._reply(200, _shown(workflow, program=True))
             del state.workflows[parts[1]]
+            self._withdraw(
+                state, because="The workflow was deleted.", workflow_id=parts[1]
+            )
             return self._reply(
                 200, {"id": workflow["id"], "name": workflow["name"], "deleted": True}
             )
@@ -182,6 +253,10 @@ class Handler(BaseHTTPRequestHandler):
             runs = state.runs
             if "workflow_id" in query:
                 runs = [r for r in runs if r["workflow_id"] == query["workflow_id"]]
+            try:
+                runs = self._filtered(runs, query, self.query_lists)
+            except ValueError as exc:
+                return self._error(400, str(exc))
             if "after" in query:
                 ids = [r["execution_id"] for r in runs]
                 runs = runs[ids.index(query["after"]) + 1 :]
@@ -209,18 +284,12 @@ class Handler(BaseHTTPRequestHandler):
                         "started_runs_deleted": 0,
                     },
                 )
-            if method == "POST" and parts[2:] == ["stop"]:
-                if run["status"] in ("success", "failed", "stopped"):
-                    return self._error(
-                        400,
-                        f"Execution already {run['status']}",
-                        error_code="run_already_finished",
-                    )
-                # A run in progress is asked to stop, and stops just after.
-                run["status"] = "stopped"
-                return self._reply(
-                    200, {"execution_id": run["execution_id"], "status": "stopping"}
+            if method == "POST" and parts[2:] == ["retry"]:
+                return self._idempotent(
+                    state, raw, lambda: self._retry(state, run, raw)
                 )
+            if method == "POST" and parts[2:] == ["stop"]:
+                return self._idempotent(state, raw, lambda: self._stop(state, run))
             self._advance(state, run)
             body = self._detail(run)
             if query.get("include_step_results") == "true":
@@ -234,20 +303,28 @@ class Handler(BaseHTTPRequestHandler):
                 if wanted == "all"
                 or (a["status"] == "pending") == (wanted == "pending")
             ]
+            if state.filters_approvals and "execution_id" in query:
+                items = [a for a in items if a["execution_id"] == query["execution_id"]]
+            if state.filters_approvals and "workflow_id" in query:
+                # Its family id, or any version's.
+                family = query["workflow_id"].removeprefix("v")
+                items = [a for a in items if a["workflow_id"] == family]
             limit = int(query.get("limit", 20))
             if "before" in query:
                 ids = [a["id"] for a in items]
                 items = items[ids.index(query["before"]) + 1 :]
-            page = items[:limit]
+            read = items[:limit]
             return self._reply(
                 200,
                 {
-                    "approvals": page,
-                    "next_before": page[-1]["id"] if len(page) == limit else None,
+                    "approvals": [a for a in read if self._reachable(state, a)],
+                    # The last one read, reported or not, so paging goes on
+                    # past a page that was all left out.
+                    "next_before": read[-1]["id"] if len(read) == limit else None,
                 },
             )
         if method == "GET" and parts[:1] == ["approvals"] and len(parts) == 2:
-            approval = next((a for a in state.approvals if a["id"] == parts[1]), None)
+            approval = self._approval(state, parts[1])
             if approval is None:
                 return self._error(404, "Approval request not found")
             return self._reply(200, approval)
@@ -326,51 +403,300 @@ class Handler(BaseHTTPRequestHandler):
                 "error": f"'{workflow['name']}' needs a value for its 'client' input.",
                 "error_code": "invalid_inputs",
             }
-        run_id = f"r{state.next_id}"
-        state.next_id += 1
-        fails = workflow_id == "7a1c"
-        listening = workflow_id == "9b2e"
-        state.runs.insert(
-            0,
-            {
-                "execution_id": run_id,
-                "workflow_id": workflow_id,
-                "version_id": "v" + workflow_id,
-                "workflow_name": workflow["name"],
-                "status": "running" if listening else "queued",
-                "created_at": "2026-10-13T09:00:00+00:00",
-                "started_at": None,
-                "completed_at": None,
-                "error": None,
-                "outputs": {},
-                "is_trigger_listener": listening,
-                "fails": fails,
-                "listening": listening,
-                "inputs": inputs,
-                "steps": [
-                    {
-                        "index": 0,
-                        "status": "failed" if fails else "completed",
-                        "result": (
-                            None if fails else f"Report for {inputs.get('client')}"
-                        ),
-                        **({"error": "Sheet not found"} if fails else {}),
-                    }
-                ],
-            },
-        )
-        state.polls[run_id] = 0
+        run = self._new_run(state, workflow_id, workflow["name"], inputs)
         started: dict[str, Any] = {
-            "execution_id": run_id,
+            "execution_id": run["execution_id"],
             "workflow_id": workflow_id,
-            "version_id": "v" + workflow_id,
+            "version_id": run["version_id"],
+            "workflow_name": workflow["name"],
             "status": "queued",
             "created_at": "2026-10-13T09:00:00+00:00",
-            "is_trigger_listener": listening,
+            "is_trigger_listener": run["listening"],
         }
-        if listening:
+        if run["listening"]:
             started.update(status="running", is_trigger_workflow=True)
         return 202, started
+
+    @staticmethod
+    def _new_run(
+        state: StandIn,
+        workflow_id: str,
+        workflow_name: str,
+        inputs: dict[str, Any],
+        *,
+        retry_of: str | None = None,
+    ) -> dict[str, Any]:
+        run_id = f"r{state.next_id}"
+        state.next_id += 1
+        workflow = state.workflows.get(workflow_id) or {}
+        failure = _FAILURES.get(workflow_id)
+        if workflow_id == "5c3d" and retry_of is not None:
+            failure = None  # The accounting system is back.
+        listening = bool(workflow.get("starts_from_trigger"))
+        run: dict[str, Any] = {
+            "execution_id": run_id,
+            "workflow_id": workflow_id,
+            "version_id": workflow.get("version_id", "v" + workflow_id),
+            "workflow_name": workflow_name,
+            "status": "running" if listening else "queued",
+            "created_at": "2026-10-13T09:00:00+00:00",
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+            "outputs": {},
+            "is_trigger_listener": listening,
+            "retry_of": retry_of,
+            "failure": failure,
+            # Whether, once it fails, it keeps where it failed, so it can be
+            # retried from there. A run from before runs kept it can't.
+            "kept_where_it_failed": True,
+            "listening": listening,
+            "inputs": inputs,
+            "steps": [
+                {
+                    "index": 0,
+                    "status": "failed" if failure else "completed",
+                    "result": (
+                        None if failure else f"Report for {inputs.get('client')}"
+                    ),
+                    **({"error": failure} if failure else {}),
+                }
+            ],
+        }
+        # The questions it will ask, the one it is asking, and the answers.
+        run.update(asks=list(workflow.get("asks") or []), asking=None, answers=[])
+        if workflow_id == "665f":
+            run["steps"] += [
+                # Failed, and its setting let the run carry on, after
+                # trying three times.
+                {
+                    "index": 1,
+                    "status": "continued",
+                    "result": None,
+                    "error": "Slack didn't answer",
+                    "attempts": 3,
+                },
+                # Turned off: no result, only why.
+                {"index": 2, "status": "skipped", "reason": "This step is turned off."},
+            ]
+        state.runs.insert(0, run)
+        state.polls[run_id] = 0
+        return run
+
+    # ── creating and changing workflows ──
+
+    def _may_write(self, state: StandIn) -> bool:
+        if "workflows:write" in state.scopes:
+            return True
+        self._error(403, "API key lacks required scope(s)", error_code="missing_scope")
+        return False
+
+    @staticmethod
+    def _validate(raw: bytes) -> tuple[int, Any]:
+        try:
+            body = _body(raw, ("program",))
+            program = _program(body.get("program"))
+        except _Refused as refused:
+            return 400, {"error": str(refused)}
+        error = _program_error(program)
+        if error:
+            return 200, {"valid": False, "error": error}
+        steps = [
+            {"index": index, "kind": statement["kind"]}
+            for index, statement in enumerate(program["body"])
+        ]
+        report: dict[str, Any] = {
+            "valid": True,
+            "preview": {"steps": steps, "outputs": {}},
+            "actions": _actions(program),
+            "has_trigger": _starts_from_trigger(program),
+            "steps": steps,
+        }
+        if not report["actions"] and not report["has_trigger"]:
+            report["warnings"] = {
+                "warning": "This workflow makes no api.request calls and has no "
+                "trigger; if it is meant to perform actions or run automatically "
+                "it is currently a no-op."
+            }
+        return 200, report
+
+    def _create(self, state: StandIn, raw: bytes) -> tuple[int, Any]:
+        try:
+            body = _body(raw, ("name", "description", "program"))
+            name = _name(body.get("name"), required=True)
+            description = _description(body.get("description")) or ""
+            program = _savable(_program(body.get("program")), previous=None)
+        except _Refused as refused:
+            return 400, refused.body
+        workflow_id = f"w{state.next_workflow_id}"
+        state.next_workflow_id += 1
+        workflow: dict[str, Any] = {
+            "id": workflow_id,
+            "name": name,
+            "description": description,
+            "publish_state": "published",
+            "created_by": "u1",
+            "created_at": "2026-10-27T12:00:00+00:00",
+            "updated_at": "2026-10-27T12:00:00+00:00",
+            "last_run_at": None,
+            "inputs": [],
+            "outputs": [],
+            "versions": 1,
+        }
+        _set_program(workflow, program)
+        state.workflows[workflow_id] = workflow
+        return 201, self._saved(state, workflow)
+
+    def _change(
+        self, state: StandIn, method: str, workflow_id: str, raw: bytes
+    ) -> tuple[int, Any]:
+        workflow = state.workflows.get(workflow_id)
+        if workflow is None:
+            return 404, {"error": "Workflow not found"}
+        if workflow.get("view_only"):
+            return 403, {
+                "error": "You have view-only access to this workflow",
+                "error_code": "item_view_only",
+            }
+        previous = workflow.get("program")
+        try:
+            if method == "PUT":
+                body = _body(raw, ("name", "description", "program"))
+                if all(body.get(f) is None for f in ("name", "description", "program")):
+                    raise _Refused(
+                        'Nothing to change: send a new "program", "name" or '
+                        '"description".'
+                    )
+                program = previous
+                if body.get("program") is not None:
+                    program = _savable(_program(body["program"]), previous=previous)
+            else:
+                body = _body(raw, ("operations", "name", "description"))
+                operations = body.get("operations")
+                if not isinstance(operations, list) or not 1 <= len(operations) <= 100:
+                    raise _Refused(
+                        '"operations" must be a list of 1 to 100 JSON Patch '
+                        "operations."
+                    )
+                patched = _patched(previous or _EMPTY_PROGRAM, operations)
+                program = _savable(patched, previous=previous)
+            name = _name(body.get("name"), required=False)
+            description = _description(body.get("description"))
+        except _Refused as refused:
+            return 400, refused.body
+        # Saving pauses the trigger of a workflow that was listening.
+        listening = [
+            run
+            for run in state.runs
+            if run["workflow_id"] == workflow_id
+            and run["listening"]
+            and run["status"] == "running"
+        ]
+        for run in listening:
+            run["status"] = "stopped"
+        workflow["versions"] = workflow.get("versions", 1) + 1
+        workflow["updated_at"] = "2026-10-27T12:30:00+00:00"
+        if name is not None:
+            workflow["name"] = name
+        if description is not None:
+            workflow["description"] = description
+        if program is not None:
+            _set_program(workflow, program)
+        return 200, self._saved(state, workflow, trigger_paused=bool(listening))
+
+    @staticmethod
+    def _saved(
+        state: StandIn, workflow: dict[str, Any], *, trigger_paused: bool | None = None
+    ) -> dict[str, Any]:
+        # As the server answers a save: the workflow as reading it gives it,
+        # and what it needs.
+        wanted = [path.split("/")[3] for path in _actions(workflow.get("program"))]
+        payload = {
+            **_shown(workflow, program=True),
+            "version_id": _version_id(workflow),
+            "url": f"https://app.lodol.com/create?programId={workflow['id']}",
+            "apps_to_connect": [
+                app.capitalize()
+                for app in dict.fromkeys(wanted)
+                if app not in state.connected_apps
+            ],
+        }
+        if trigger_paused is not None:
+            payload["trigger_paused"] = trigger_paused
+        return payload
+
+    def _stop(self, state: StandIn, run: dict[str, Any]) -> tuple[int, Any]:
+        if run["status"] in ("success", "failed", "stopped"):
+            return 400, {
+                "error": f"Execution already {run['status']}",
+                "error_code": "run_already_finished",
+            }
+        # A run on a step is asked to stop, and finishes that step first; one
+        # not on a step (queued, or set aside) stops at once. Here, either
+        # has stopped by the time it's next looked at.
+        on_a_step = run["status"] == "running"
+        run["status"] = "stopped"
+        run["completed_at"] = "2026-10-13T09:00:05+00:00"
+        self._withdraw(
+            state,
+            because="The run was stopped before anyone answered.",
+            execution_id=run["execution_id"],
+        )
+        # The whole run, as reading it gives it.
+        body = self._detail(run)
+        if on_a_step:
+            body.update(status="stopping", completed_at=None)
+        return 200, body
+
+    def _retry(
+        self, state: StandIn, run: dict[str, Any], raw: bytes
+    ) -> tuple[int, Any]:
+        body = json.loads(raw) if raw.strip() else {}
+        mode = body.get("from", "failed_step")
+        if mode not in ("failed_step", "start"):
+            return 400, {"error": '"from" must be "failed_step" or "start".'}
+        offered = self._retry_options(run)
+        if not offered["from_start"]:
+            return 409, {
+                "error": "Only a run that failed can be retried.",
+                "error_code": "run_not_retryable",
+            }
+        if mode == "failed_step" and not offered["from_failed_step"]:
+            return 409, {
+                "error": "This run failed before Lodol kept where runs fail, so "
+                "it can only be retried from the start.",
+                "error_code": "run_not_retryable",
+            }
+        retry = self._new_run(
+            state,
+            run["workflow_id"],
+            run["workflow_name"],
+            run["inputs"],
+            retry_of=run["execution_id"],
+        )
+        return 202, {
+            "execution_id": retry["execution_id"],
+            "retry_of": run["execution_id"],
+            "workflow_id": retry["workflow_id"],
+            "version_id": retry["version_id"],
+            "workflow_name": retry["workflow_name"],
+            "from": mode,
+            "version": "latest",
+            "failed_step": (
+                {"error_type": "step_failed", "retryable": True}
+                if run["kept_where_it_failed"]
+                else None
+            ),
+            "status": "queued",
+        }
+
+    @staticmethod
+    def _retry_options(run: dict[str, Any]) -> dict[str, bool]:
+        retryable = run["status"] == "failed" and not run["listening"]
+        return {
+            "from_start": retryable,
+            "from_failed_step": retryable and run["kept_where_it_failed"],
+        }
 
     @staticmethod
     def _advance(state: StandIn, run: dict[str, Any]) -> None:
@@ -379,13 +705,77 @@ class Handler(BaseHTTPRequestHandler):
         state.polls[run["execution_id"]] = state.polls.get(run["execution_id"], 0) + 1
         if state.polls[run["execution_id"]] == 1:
             run["status"], run["started_at"] = "running", "2026-10-13T09:00:01+00:00"
+        elif run["asking"] is not None:
+            approval = next(a for a in state.approvals if a["id"] == run["asking"])
+            if approval["status"] == "pending":
+                return
+            if run.pop("answer_seen", None) is None:
+                # Answered, but the run reads awaiting_approval a moment
+                # longer, until it has picked the answer up.
+                run["answer_seen"] = True
+                return
+            run["answers"].append(approval["status"])
+            run["status"], run["asking"] = "running", None
+        elif run["asks"]:
+            approval = {
+                "id": f"a{state.next_approval_id}",
+                "kind": "approval",
+                "status": "pending",
+                "title": run["asks"].pop(0),
+                "execution_id": run["execution_id"],
+                "workflow_id": run["workflow_id"],
+                "workflow_name": run["workflow_name"],
+            }
+            state.next_approval_id += 1
+            state.approvals.insert(0, approval)
+            run["status"], run["asking"] = "awaiting_approval", approval["id"]
         else:
-            run["status"] = "failed" if run["fails"] else "success"
+            run["status"] = "failed" if run["failure"] else "success"
             run["completed_at"] = "2026-10-13T09:00:04+00:00"
-            if run["fails"]:
-                run["error"] = "Sheet not found"
-            elif run["workflow_id"] == "665f":
-                run["outputs"] = {"total": 1250}
+            if run["failure"]:
+                run["error"] = run["failure"]
+            elif run["workflow_id"] == "4e8d":
+                run["outputs"] = {"paid": "rejected" not in run["answers"]}
+            elif run["workflow_id"] in _OUTPUTS:
+                run["outputs"] = dict(_OUTPUTS[run["workflow_id"]])
+
+    @staticmethod
+    def _filtered(
+        runs: list[dict[str, Any]], query: dict[str, str], lists: dict[str, list[str]]
+    ) -> list[dict[str, Any]]:
+        # As the server reads them. It leaves out a status it doesn't know,
+        # and with none left, doesn't filter by status at all.
+        statuses = [
+            status
+            for status in (s.strip().lower() for s in lists.get("status", []))
+            if status in _KNOWN_STATUSES
+        ]
+        if statuses:
+            runs = [r for r in runs if r["status"] in statuses]
+        start = _run_time(query.get("from"), "from")
+        end = _run_time(query.get("to"), "to")
+        if start is not None and end is not None and end <= start:
+            raise ValueError("The end of the date range must be after its start.")
+        if start is not None or end is not None:
+            # By when a run started: one still queued hasn't.
+            runs = [
+                r
+                for r in runs
+                if r["started_at"] is not None
+                and (start is None or _started(r) >= start)
+                and (end is None or _started(r) < end)
+            ]
+        search = (query.get("search") or "").strip().lower()
+        if search:
+            runs = [
+                r
+                for r in runs
+                if search
+                in json.dumps(
+                    [r["workflow_name"], r["inputs"], r["outputs"], r["error"]]
+                ).lower()
+            ]
+        return runs
 
     @staticmethod
     def _listed(run: dict[str, Any]) -> dict[str, Any]:
@@ -404,9 +794,9 @@ class Handler(BaseHTTPRequestHandler):
         )
         return {name: run[name] for name in fields}
 
-    @staticmethod
-    def _detail(run: dict[str, Any]) -> dict[str, Any]:
-        # As GET /executions/<id> gives a run: with what it handed back.
+    def _detail(self, run: dict[str, Any]) -> dict[str, Any]:
+        # As GET /executions/<id> gives a run: with what it handed back, and
+        # how it can be retried.
         fields = (
             "execution_id",
             "workflow_id",
@@ -419,16 +809,77 @@ class Handler(BaseHTTPRequestHandler):
             "completed_at",
             "error",
             "outputs",
+            "retry_of",
         )
-        return {name: run[name] for name in fields}
+        return {
+            **{name: run[name] for name in fields},
+            "retry_options": self._retry_options(run),
+        }
+
+    @staticmethod
+    def _reachable(state: StandIn, approval: dict[str, Any]) -> bool:
+        return approval.get("workflow_id") not in state.hidden_workflows
+
+    def _approval(self, state: StandIn, approval_id: str) -> dict[str, Any] | None:
+        # A request the key can't see is one it can't read or answer either.
+        approval = next((a for a in state.approvals if a["id"] == approval_id), None)
+        if approval is None or not self._reachable(state, approval):
+            return None
+        return approval
+
+    @staticmethod
+    def _settled(approval: dict[str, Any]) -> dict[str, str]:
+        # Why a request can't be answered any more, in the server's words.
+        asks_for_reply = approval["kind"] == "reply"
+        nobody = "Nobody replied to" if asks_for_reply else "Nobody decided"
+        if approval["status"] == "cancelled":
+            withdrawn = [
+                event
+                for event in approval.get("events") or []
+                if event.get("type") == "cancelled"
+            ]
+            detail = withdrawn[-1].get("detail") if withdrawn else None
+            return {
+                "error": "This request was withdrawn."
+                + (f" {detail}" if detail else ""),
+                "error_code": "approval_withdrawn",
+            }
+        if approval["status"] == "expired":
+            return {
+                "error": f"{nobody} this request in time, so it has closed.",
+                "error_code": "approval_expired",
+            }
+        if (approval.get("decision") or {}).get("via") == "timeout":
+            return {
+                "error": f"{nobody} this request in time, so it was "
+                f"{approval['status']} automatically.",
+                "error_code": "approval_expired",
+            }
+        answered = "answered" if asks_for_reply else "decided"
+        return {
+            "error": f"This request has already been {answered}.",
+            "error_code": "approval_already_answered",
+        }
+
+    @staticmethod
+    def _withdraw(state: StandIn, *, because: str, **matching: str) -> None:
+        # As the server withdraws a run's pending requests when it stops.
+        for approval in state.approvals:
+            if approval["status"] == "pending" and all(
+                approval.get(name) == value for name, value in matching.items()
+            ):
+                approval["status"] = "cancelled"
+                approval.setdefault("events", []).append(
+                    {"type": "cancelled", "detail": because}
+                )
 
     def _decide(self, state: StandIn, approval_id: str, raw: bytes) -> tuple[int, Any]:
-        approval = next((a for a in state.approvals if a["id"] == approval_id), None)
+        approval = self._approval(state, approval_id)
         if approval is None:
             return 404, {"error": "Approval request not found."}
         data = json.loads(raw)
         if approval["status"] != "pending":
-            return 409, {"error": "This request has already been decided."}
+            return 409, self._settled(approval)
         if approval["kind"] == "reply":
             approval["status"] = "replied"
             approval["decision"] = {
@@ -448,9 +899,294 @@ class Handler(BaseHTTPRequestHandler):
         return 200, approval
 
 
+# Every status the server keeps a run in, and so knows as a filter.
+_KNOWN_STATUSES = frozenset(
+    {
+        "queued",
+        "running",
+        "success",
+        "failed",
+        "stopped",
+        "paused",
+        "awaiting_review",
+        "awaiting_input",
+        "awaiting_approval",
+        "waiting",
+        "waiting_for_trigger",
+        "unknown",
+    }
+)
+
+
+def _run_time(raw: str | None, name: str) -> dt.datetime | None:
+    # As the server reads one: a date alone is the start of that day, and a
+    # time without an offset is UTC.
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip()
+    if text[-1] in "Zz":
+        text = text[:-1] + "+00:00"
+    try:
+        moment = dt.datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(
+            f"{name} must be a date or time in ISO 8601, like 2026-10-15 or "
+            "2026-10-15T09:30:00Z."
+        ) from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return moment
+
+
+def _shown(workflow: dict[str, Any], *, program: bool = False) -> dict[str, Any]:
+    # A workflow as the workflow endpoints give it, without what only the
+    # stand-in keeps (the questions its runs ask, its version count).
+    shown = {
+        "id": workflow["id"],
+        "name": workflow["name"],
+        "description": workflow.get("description", ""),
+        "created_by": workflow.get("created_by"),
+        "created_at": workflow.get("created_at"),
+        "updated_at": workflow.get("updated_at"),
+        "last_run_at": workflow.get("last_run_at"),
+        "publish_state": workflow.get("publish_state", "published"),
+        "starts_from_trigger": bool(workflow.get("starts_from_trigger")),
+        "inputs": workflow["inputs"],
+        "outputs": workflow["outputs"],
+    }
+    if program:
+        shown["program"] = workflow.get("program") or {"kind": "Program"}
+    return shown
+
+
+def _version_id(workflow: dict[str, Any]) -> str:
+    versions = workflow.get("versions", 1)
+    return f"v{workflow['id']}" + (f".{versions}" if versions > 1 else "")
+
+
+def _set_program(workflow: dict[str, Any], program: dict[str, Any]) -> None:
+    workflow["program"] = program
+    workflow["starts_from_trigger"] = _starts_from_trigger(program)
+    workflow["version_id"] = _version_id(workflow)
+
+
+class _Refused(Exception):
+    """A request that can't be carried out as sent, and why."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.body = {"error": message, **({"error_code": code} if code else {})}
+
+
+_EMPTY_PROGRAM: dict[str, Any] = {"kind": "Program", "version": 1, "body": []}
+
+# The statements a program is made of, as the workflow guide lists them.
+_STATEMENTS = frozenset(
+    {
+        "BlockStmt",
+        "LetStmt",
+        "AssignStmt",
+        "IfStmt",
+        "WhileStmt",
+        "ForOfStmt",
+        "RepeatStmt",
+        "TryStmt",
+        "WhenStmt",
+        "FrequencyStmt",
+        "BreakStmt",
+        "ContinueStmt",
+        "StopStmt",
+        "ExprStmt",
+    }
+)
+
+
+def _body(raw: bytes, allowed: tuple[str, ...]) -> dict[str, Any]:
+    try:
+        body = json.loads(raw) if raw.strip() else None
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise _Refused("The request body must be a JSON object.")
+    unknown = sorted(name for name in body if name not in allowed)
+    if unknown:
+        raise _Refused(
+            f"The request body has unknown field(s): {', '.join(unknown)}. It "
+            f"takes {', '.join(allowed)}."
+        )
+    return body
+
+
+def _program(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _Refused(
+            '"program" must be the workflow\'s Program AST as a JSON object, '
+            'such as {"kind": "Program", "version": 1, "body": [...]}.'
+        )
+    return value
+
+
+def _name(value: Any, *, required: bool) -> str | None:
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise _Refused('"name" must be the workflow\'s name, as text.')
+    if len(value.strip()) > 255:
+        raise _Refused(
+            f'"name" is {len(value.strip()):,} characters; a workflow\'s name may '
+            "be at most 255."
+        )
+    return value.strip()
+
+
+def _description(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _Refused('"description" must be text.')
+    if len(value) > 5000:
+        raise _Refused(
+            f'"description" is {len(value):,} characters; it may be at most 5,000.'
+        )
+    return value.strip()
+
+
+def _program_error(program: dict[str, Any]) -> str | None:
+    # What the stand-in holds a program to: the shape of one, made of
+    # statements it knows.
+    if program.get("kind") != "Program":
+        return 'A program\'s "kind" must be "Program"'
+    body = program.get("body")
+    if not isinstance(body, list):
+        return 'A program\'s "body" must be a list of statements'
+    for index, statement in enumerate(body):
+        if not isinstance(statement, dict) or statement.get("kind") not in _STATEMENTS:
+            return f"Statement {index} of the program isn't a statement"
+    return None
+
+
+def _savable(program: dict[str, Any], *, previous: Any) -> dict[str, Any]:
+    error = _program_error(program)
+    if error:
+        raise _Refused(
+            f"The workflow is invalid and was not saved: {error}. "
+            "POST /api/v1/workflows/validate checks a program without saving it.",
+            code="invalid_workflow",
+        )
+    if isinstance(previous, dict) and previous.get("body") and not program["body"]:
+        raise _Refused(
+            "Refusing to replace this workflow's steps with an empty program. To "
+            'change only its name or description, leave out "program".',
+            code="invalid_workflow",
+        )
+    return program
+
+
+def _nodes(value: Any) -> Iterator[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _nodes(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _nodes(item)
+
+
+def _actions(program: Any) -> list[str]:
+    # The action paths of its api.request calls.
+    paths = []
+    for node in _nodes(program):
+        args = node.get("args")
+        if node.get("kind") == "NativeCallExpr" and node.get("name") == "api.request":
+            if isinstance(args, list) and len(args) > 1 and isinstance(args[1], dict):
+                paths.append(str(args[1].get("value")))
+    return paths
+
+
+def _starts_from_trigger(program: Any) -> bool:
+    # A trigger or schedule can only be its first statement.
+    body = program.get("body") if isinstance(program, dict) else None
+    if not isinstance(body, list) or not body or not isinstance(body[0], dict):
+        return False
+    first = body[0]
+    if first.get("kind") in ("WhenStmt", "FrequencyStmt"):
+        return True
+    init = first.get("init")
+    return (
+        first.get("kind") == "LetStmt"
+        and isinstance(init, dict)
+        and init.get("kind") == "NativeCallExpr"
+        and str(init.get("name", "")).endswith("_trigger")
+    )
+
+
+def _patched(program: dict[str, Any], operations: list[Any]) -> dict[str, Any]:
+    # JSON Patch's replace, add and remove, in order, to a copy.
+    patched = copy.deepcopy(program)
+    for number, operation in enumerate(operations, start=1):
+        try:
+            _apply(patched, operation)
+        except (KeyError, IndexError, ValueError, TypeError):
+            raise _Refused(
+                f"Couldn't apply the patch: operation {number} doesn't fit the "
+                "workflow's program. The workflow is unchanged."
+            ) from None
+    return patched
+
+
+def _apply(document: dict[str, Any], operation: Any) -> None:
+    if not isinstance(operation, dict) or operation.get("op") not in (
+        "replace",
+        "add",
+        "remove",
+    ):
+        raise ValueError(operation)
+    path = operation.get("path")
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError(path)
+    *steps, last = [
+        part.replace("~1", "/").replace("~0", "~") for part in path[1:].split("/")
+    ]
+    parent: Any = document
+    for step in steps:
+        parent = parent[int(step)] if isinstance(parent, list) else parent[step]
+    op = operation["op"]
+    if isinstance(parent, list):
+        if op == "add":
+            index = len(parent) if last == "-" else int(last)
+            if not 0 <= index <= len(parent):
+                raise IndexError(index)
+            parent.insert(index, operation.get("value"))
+        elif op == "remove":
+            del parent[int(last)]
+        else:
+            parent[int(last)] = operation.get("value")
+        return
+    if not isinstance(parent, dict):
+        raise TypeError(path)
+    if op in ("replace", "remove") and last not in parent:
+        raise KeyError(path)
+    if op == "remove":
+        del parent[last]
+    else:
+        parent[last] = operation.get("value")
+
+
+def _started(run: dict[str, Any]) -> dt.datetime:
+    started = _run_time(run["started_at"], "started_at")
+    assert started is not None
+    return started
+
+
+# Why each workflow's runs fail, for those that do.
+_FAILURES = {"7a1c": "Sheet not found", "5c3d": "The accounting system didn't answer"}
+# What each workflow's runs hand back when they succeed.
+_OUTPUTS: dict[str, dict[str, Any]] = {"665f": {"total": 1250}, "5c3d": {"synced": 12}}
+
 _FALLBACK_CODES = {
     400: "invalid_request",
     401: "unauthorized",
+    403: "forbidden",
     404: "not_found",
     409: "conflict",
     422: "unprocessable_request",

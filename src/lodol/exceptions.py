@@ -137,8 +137,14 @@ class NotFoundError(APIStatusError):
 
 
 class ConflictError(APIStatusError):
-    """409: the request collides with the state of things, such as answering
-    an approval request someone else already answered."""
+    """409: the request collides with the state of things.
+
+    Answering an approval request that is no longer pending says why in
+    ``code``: ``"approval_already_answered"`` (someone answered it first),
+    ``"approval_expired"`` (nobody answered in time: it closed, or the
+    step's time limit decided it automatically) or ``"approval_withdrawn"``
+    (the run was stopped, or its workflow deleted, before anyone answered).
+    """
 
 
 class UnprocessableEntityError(APIStatusError):
@@ -167,11 +173,6 @@ class RateLimitError(APIStatusError):
             message, status_code=status_code, code=code, body=body, response=response
         )
         self.retry_after = retry_after
-
-
-class ConcurrencyLimitError(RateLimitError):
-    """429: the workspace is already running as many runs at once as its plan
-    allows. Wait for one to finish (or stop one), then start another."""
 
 
 class RunLimitError(RateLimitError):

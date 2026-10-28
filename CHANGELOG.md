@@ -8,21 +8,24 @@ The SDK, redesigned for production use, and its first release on PyPI. 0.1 was o
 
 - **Outputs.** `run.outputs` holds what a run handed back, by the names its workflow declares, and `workflow.outputs` lists them, so a script reads results instead of digging through step results.
 - **`AsyncLodol`**: everything `Lodol` does, for asyncio and trio.
-- **Approvals.** `lodol.approvals` lists the approval requests runs are waiting on, and answers them with `approve`, `reject` or `reply`.
+- **Approvals.** `lodol.approvals` lists the approval requests runs are waiting on, and answers them with `approve`, `reject` or `reply`. `approvals.wait_for(run)` waits until a run asks, pacing itself as `runs.wait` does, and returns the request it's waiting on, and `approvals.list(run=..., workflow=...)` lists one run's or one workflow's. Answering one that's no longer pending raises `ConflictError` with a `code` saying why: `"approval_already_answered"`, `"approval_expired"` or `"approval_withdrawn"`.
 - **Deleting runs.** `runs.delete(run)` removes a finished run, and the runs it started, from the history. It needs a key with the new **Delete runs** scope.
+- **Retrying a failed run.** `runs.retry(run)` runs it again with the data it started with, picking up at the step that failed without running the steps before it again, or, with `from_start=True`, from the top. `run.retry_options` says which retries a run offers, and a retry's `run.retry_of` names the run it retried.
+- **Creating and changing workflows.** `workflows.create` saves a new one, `update` replaces a workflow's steps, name or description, and `edit` changes its steps with JSON Patch operations; `workflows.validate` checks a program without saving it, as a `WorkflowCheck`. A save says where to open the workflow (`url`), the version it saved (`version_id`), the apps still to connect (`apps_to_connect`) and whether it paused a listening trigger (`trigger_paused`). They need a key with the **Create and edit workflows** scope, which is ticked by default.
 - **Lists you just loop over.** `runs.list()` and `approvals.list()` fetch pages as you go, newest first; `limit=` stops early.
+- **Finding runs.** `runs.list()` narrows to runs in a status or several (`status=`), that started in a time range (`started_from=`, `started_to=`), or whose workflow's name or data matches (`search=`). A status runs can't be listed by raises `ValueError` before anything is sent, since Lodol would ignore it and list every run.
 - **Lodol Local**, and any other address: `base_url=` or `LODOL_BASE_URL`.
 - **`RunFailedError`.** Waiting for a run that fails or is stopped raises, with the finished run attached, so a script never carries on as if it worked.
-- **`ConcurrencyLimitError` and `RunLimitError`**, both kinds of `RateLimitError`, so "too many runs at once" and "this month's runs are used up" (with `resets_at`) can be told apart from "slow down".
+- **`RunLimitError`**, a kind of `RateLimitError`, so "this month's runs are used up" (with `resets_at`) can be told apart from "slow down".
 - Every `APIStatusError` carries the server's machine-readable `code`, which the SDK itself now goes by, never the wording, and `request_id`, which is also in the error's text, so it comes along when an error is pasted into a support request.
-- `Workflow.is_draft`. Times are timezone-aware `datetime`s, step results are `Step` objects, and `RunStatus` and `ApprovalStatus` list the statuses.
+- `Workflow.is_draft`. Times are timezone-aware `datetime`s, step results are `Step` objects, which say why a step was skipped (`reason`) and how many tries it took (`attempts`), and `RunStatus`, `StepStatus` and `ApprovalStatus` list the statuses. A step that failed but was let carry on is `"continued"`, and never taken for the step that failed a run.
 - Dates, times, `Decimal`s and UUIDs in `inputs` are sent as text Lodol reads, and an input that can't be sent is named before anything is sent.
 - Any text works as an `idempotency_key`, and the same inputs are always sent byte for byte the same way, so a key always recognizes its request.
-- A workflow that starts from its own trigger, run with `wait=True` or waited on with `runs.wait`, returns at once with a warning: its run is it listening, and never ends. `run.is_trigger_listener` says so, since its status reads `"running"` the whole time. A failed run says why in `run.error` in `runs.list` too.
+- A workflow that starts from its own trigger, run with `wait=True` or waited on with `runs.wait`, returns at once with a warning, naming the workflow: its run is it listening, and never ends. `run.is_trigger_listener` says so, since its status reads `"running"` the whole time, and `workflow.starts_from_trigger` says so before it runs. A failed run says why in `run.error` in `runs.list` too.
 - Models can be hashed, and errors can be pickled, so both cross process boundaries (multiprocessing, task queues).
 - `LODOL_LOG=info` or `LODOL_LOG=debug` turns on logging.
 
-0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener` and `request_id` the SDK relies on. Update an older Lodol Local before upgrading.
+0.2 needs Lodol as of October 2026, which sends the error codes, outputs, `is_trigger_listener`, `starts_from_trigger`, `retry_options` and `request_id` the SDK relies on, retries runs, filters runs by status, start time and search, lists one run's or one workflow's approval requests, says why one can't be answered, and creates and changes workflows. Update an older Lodol Local before upgrading.
 
 ### Fixed
 

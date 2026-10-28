@@ -17,7 +17,10 @@ T = TypeVar("T")
 
 # Given the cursor from the previous page (None for the first) and how many
 # items to ask for, fetch a page: its items and the next page's cursor, or
-# None when there are no more.
+# None when there are no more. A page can hold fewer items than asked for,
+# even none, and still not be the last: Lodol leaves out what the key's
+# member can't see after reading a page, and still says where the next
+# one starts.
 FetchPage = Callable[[str | None, int], tuple[list[T], str | None]]
 AsyncFetchPage = Callable[[str | None, int], Awaitable[tuple[list[T], str | None]]]
 
@@ -42,9 +45,11 @@ class Paginator(Generic[T]):
                 yield item
             if remaining is not None:
                 remaining -= len(items)
-            if next_cursor is None or not items:
+            # Only the cursor says whether there is more: an empty page
+            # with one is a page of things the key can't see.
+            if next_cursor is None:
                 return
-            cursor = _advance(cursor, next_cursor)
+            cursor = advance(cursor, next_cursor)
 
     def __repr__(self) -> str:
         return _describe(type(self).__name__, self._noun, self._limit)
@@ -71,9 +76,11 @@ class AsyncPaginator(Generic[T]):
                 yield item
             if remaining is not None:
                 remaining -= len(items)
-            if next_cursor is None or not items:
+            # Only the cursor says whether there is more: an empty page
+            # with one is a page of things the key can't see.
+            if next_cursor is None:
                 return
-            cursor = _advance(cursor, next_cursor)
+            cursor = advance(cursor, next_cursor)
 
     def __repr__(self) -> str:
         return _describe(type(self).__name__, self._noun, self._limit)
@@ -87,7 +94,7 @@ def check_limit(limit: int | None) -> int | None:
     return limit
 
 
-def _advance(cursor: str | None, next_cursor: str) -> str:
+def advance(cursor: str | None, next_cursor: str) -> str:
     # A page that points back at itself would be fetched forever.
     if next_cursor == cursor:
         raise APIResponseValidationError(

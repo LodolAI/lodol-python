@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
+from typing import Any
 
 import httpx2
 import pytest
@@ -16,10 +18,12 @@ from lodol import (
     Lodol,
     NotFoundError,
     PermissionDeniedError,
+    RetryOptions,
     Run,
     RunFailedError,
     RunStatus,
     Step,
+    StepStatus,
     WaitTimeoutError,
     Workflow,
 )
@@ -96,6 +100,144 @@ def test_list_one_workflows_runs(client: Lodol, api: FakeAPI) -> None:
     list(client.runs.list(workflow=Workflow(id="665f", name="Monthly report"), limit=5))
 
     assert api.sent()[2] == {"limit": "5", "workflow_id": "665f"}
+
+
+def test_list_failed_runs_since_a_date(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, runs_page("r1")))
+
+    list(client.runs.list(status="failed", started_from=dt.date(2026, 10, 1)))
+
+    assert api.sent()[2] == {"limit": "100", "status": "failed", "from": "2026-10-01"}
+
+
+def test_list_by_several_statuses_on_every_page(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(200, runs_page(*[f"r{i}" for i in range(100)])),
+        respond(200, runs_page("r100")),
+    )
+
+    runs = client.runs.list(
+        status=["failed", RunStatus.STOPPED, "failed"], search=" Acme "
+    )
+
+    assert len(list(runs)) == 101
+    for request in api.requests:
+        # Repeated, once each, as the API takes several.
+        assert request.url.params.get_list("status") == ["failed", "stopped"]
+        assert request.url.params["search"] == "Acme"
+    assert api.requests[1].url.params["after"] == "r99"
+
+
+def test_a_status_given_as_a_runstatus(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, runs_page("r1")))
+
+    list(client.runs.list(status=RunStatus.AWAITING_APPROVAL))
+
+    assert api.sent()[2]["status"] == "awaiting_approval"
+
+
+@pytest.mark.parametrize(
+    ("started_from", "started_to", "sent"),
+    [
+        # A time without a timezone goes as it is; Lodol reads it as UTC.
+        (
+            dt.datetime(2026, 10, 1, 9, 30),
+            None,
+            {"from": "2026-10-01T09:30:00"},
+        ),
+        (
+            None,
+            dt.datetime(2026, 10, 1, 9, 30, tzinfo=dt.timezone(dt.timedelta(hours=2))),
+            {"to": "2026-10-01T09:30:00+02:00"},
+        ),
+        (
+            dt.date(2026, 10, 1),
+            dt.datetime(2026, 10, 1, 0, 0, 1),
+            {"from": "2026-10-01", "to": "2026-10-01T00:00:01"},
+        ),
+    ],
+)
+def test_list_by_when_runs_started(
+    client: Lodol,
+    api: FakeAPI,
+    started_from: dt.date | None,
+    started_to: dt.date | None,
+    sent: dict[str, str],
+) -> None:
+    api.queue(respond(200, runs_page("r1")))
+
+    list(client.runs.list(started_from=started_from, started_to=started_to))
+
+    assert api.sent()[2] == {"limit": "100", **sent}
+
+
+@pytest.mark.parametrize(
+    ("started_from", "started_to"),
+    [
+        (dt.date(2026, 10, 2), dt.date(2026, 10, 1)),
+        (dt.date(2026, 10, 1), dt.date(2026, 10, 1)),
+        # A date is the start of its day.
+        (dt.date(2026, 10, 1), dt.datetime(2026, 10, 1)),
+        # 10:00 at UTC+2 is 08:00 UTC, before 09:00 UTC.
+        (
+            dt.datetime(2026, 10, 1, 9, 0),
+            dt.datetime(2026, 10, 1, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=2))),
+        ),
+    ],
+)
+def test_a_range_that_ends_before_it_starts_is_refused(
+    client: Lodol, api: FakeAPI, started_from: dt.date, started_to: dt.date
+) -> None:
+    with pytest.raises(ValueError, match="started_to .* must be after started_from"):
+        client.runs.list(started_from=started_from, started_to=started_to)
+
+    assert api.requests == []
+
+
+def test_a_status_runs_arent_listed_by_is_refused(client: Lodol, api: FakeAPI) -> None:
+    """Lodol ignores a status it doesn't know, and with none left lists every
+    run: a typo in a loop that deletes would delete them all."""
+    with pytest.raises(ValueError) as exc:
+        client.runs.list(status=["failed", "faild"])
+
+    assert str(exc.value) == (
+        "'faild' isn't a status runs can be listed by. Use one of 'queued', "
+        "'running', 'waiting', 'awaiting_approval', 'paused', 'success', "
+        "'failed', 'stopped'."
+    )
+    assert api.requests == []
+
+
+def test_stopping_isnt_a_status_runs_are_listed_by(client: Lodol) -> None:
+    with pytest.raises(ValueError, match="listed as 'running' until it has stopped"):
+        client.runs.list(status=RunStatus.STOPPING)
+
+
+@pytest.mark.parametrize(
+    ("filters", "error", "complaint"),
+    [
+        ({"status": []}, ValueError, "status is an empty list"),
+        ({"status": 3}, TypeError, "a status, or a list of them, not int"),
+        ({"status": [RunStatus.FAILED, 3]}, TypeError, "text or a RunStatus, not int"),
+        ({"status": b"failed"}, TypeError, "text or a RunStatus, not int"),
+        ({"started_from": "2026-10-01"}, TypeError, "a datetime or a date, not str"),
+        ({"started_to": 1759276800}, TypeError, "a datetime or a date, not int"),
+        ({"search": "  "}, ValueError, "search is empty"),
+        ({"search": 4471}, TypeError, "search must be text, not int"),
+        ({"workflow": 665}, TypeError, "workflow id or a Workflow"),
+    ],
+)
+def test_filters_are_checked_before_anything_is_sent(
+    client: Lodol,
+    api: FakeAPI,
+    filters: dict[str, Any],
+    error: type[Exception],
+    complaint: str,
+) -> None:
+    with pytest.raises(error, match=complaint):
+        client.runs.list(**filters)
+
+    assert api.requests == []
 
 
 def test_each_loop_starts_from_the_newest(client: Lodol, api: FakeAPI) -> None:
@@ -262,6 +404,48 @@ def test_a_failure_without_a_run_error_names_the_failed_steps(
         client.runs.wait("683b")
 
 
+def test_a_step_that_carried_on_isnt_named_as_the_failure(
+    client: Lodol, api: FakeAPI
+) -> None:
+    failed = run_json(
+        status="failed",
+        steps=[
+            {"index": 0, "status": "continued", "error": "Slack didn't answer"},
+            {"index": 1, "status": "skipped", "reason": "This step is turned off."},
+            {"index": 2, "status": "failed", "error": "Sheet not found"},
+        ],
+    )
+    api.queue(respond(200, run_json(status="failed")), respond(200, failed))
+
+    with pytest.raises(RunFailedError) as exc:
+        client.runs.wait("683b")
+
+    assert str(exc.value) == "Run 683b failed: Sheet not found"
+
+
+def test_a_step_that_carried_on_doesnt_fail_the_run(
+    client: Lodol, api: FakeAPI
+) -> None:
+    steps = [
+        {"index": 0, "status": "continued", "error": "Slack didn't answer"},
+        {"index": 1, "status": "completed", "result": "Sent", "attempts": 3},
+    ]
+    api.queue(
+        respond(200, run_json(status="success")),
+        respond(200, run_json(status="success", steps=steps)),
+    )
+
+    run = client.runs.wait("683b")
+
+    assert run.succeeded
+    assert run.steps is not None
+    assert [step.status for step in run.steps] == [
+        StepStatus.CONTINUED,
+        StepStatus.COMPLETED,
+    ]
+    assert run.steps[1].attempts == 3
+
+
 def test_a_failure_with_no_reason_at_all(client: Lodol, api: FakeAPI) -> None:
     api.queue(respond(200, run_json(status="failed")))
 
@@ -389,14 +573,44 @@ def test_wait_says_what_the_run_is_doing(
 # ── Stopping ─────────────────────────────────────────────────────────────
 
 
-def test_stop(client: Lodol, api: FakeAPI) -> None:
-    api.queue(respond(200, {"execution_id": "683b", "status": "stopping"}))
+def test_stop_returns_the_whole_run(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            200,
+            run_json(
+                status="stopping",
+                version_id="6683",
+                workflow_name="Monthly report",
+                is_trigger_listener=False,
+                created_at="2026-10-13T09:00:00+00:00",
+                started_at="2026-10-13T09:00:01+00:00",
+                completed_at=None,
+                error=None,
+                outputs={},
+                retry_of="682a",
+                retry_options={"from_start": False, "from_failed_step": False},
+            ),
+        )
+    )
 
     run = client.runs.stop("683b")
 
     assert api.sent() == ("POST", "/executions/683b/stop", {})
     assert api.last.headers["Idempotency-Key"].startswith("lodol-run-stop-")
-    assert run.status == "stopping"
+    assert run.status == RunStatus.STOPPING and not run.finished
+    assert (run.workflow_id, run.version_id) == ("665f", "6683")
+    assert run.workflow_name == "Monthly report"
+    assert run.started_at is not None and run.completed_at is None
+    assert run.retry_of == "682a" and run.retry_options == RetryOptions()
+
+
+def test_stop_on_an_older_lodol(client: Lodol, api: FakeAPI) -> None:
+    """Which answered with only the run's id and status."""
+    api.queue(respond(200, {"execution_id": "683b", "status": "stopping"}))
+
+    run = client.runs.stop("683b")
+
+    assert run == Run(id="683b", status="stopping")
 
 
 def test_stopping_a_run_that_already_finished_returns_it(
@@ -496,6 +710,176 @@ def test_delete_refusals_carry_the_servers_words(
         client.runs.delete("683b")
 
     assert str(exc.value) == message
+
+
+# ── Retrying ─────────────────────────────────────────────────────────────
+
+
+def retry_json(**fields: object) -> dict[str, object]:
+    return {
+        "execution_id": "684c",
+        "retry_of": "683b",
+        "workflow_id": "665f",
+        "version_id": "6683",
+        "workflow_name": "Monthly report",
+        "from": "failed_step",
+        "version": "latest",
+        "failed_step": {"error_type": "step_failed", "retryable": True},
+        "status": "queued",
+        **fields,
+    }
+
+
+def test_retry_picks_up_at_the_failed_step(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, retry_json()))
+
+    retry = client.runs.retry("683b")
+
+    assert api.sent() == ("POST", "/executions/683b/retry", {})
+    assert api.body() == {"from": "failed_step"}
+    assert api.last.headers["Idempotency-Key"].startswith("lodol-run-retry-")
+    assert retry.id == "684c" and retry.retry_of == "683b"
+    assert retry.status == "queued"
+    assert (retry.workflow_id, retry.version_id) == ("665f", "6683")
+    assert retry.workflow_name == "Monthly report"
+    # What the SDK doesn't model is still there.
+    assert retry.raw["version"] == "latest"
+    # The start of a run doesn't say how it could be retried.
+    assert retry.retry_options is None
+
+
+def test_retry_from_the_start(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, retry_json(**{"from": "start"})))
+
+    client.runs.retry(Run(id="683b", status="failed"), from_start=True)
+
+    assert api.body() == {"from": "start"}
+
+
+def test_every_retry_gets_its_own_key(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, retry_json()), respond(202, retry_json()))
+
+    client.runs.retry("683b")
+    client.runs.retry("683b")
+
+    first, second = (request.headers["Idempotency-Key"] for request in api.requests)
+    assert first != second
+
+
+def test_retry_with_your_own_key(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(202, retry_json()))
+
+    client.runs.retry("683b", idempotency_key="retry:683b")
+
+    assert api.last.headers["Idempotency-Key"] == "retry:683b"
+
+
+def test_a_retry_is_sent_again_with_the_same_key(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(httpx2.ReadTimeout("slow"), respond(202, retry_json()))
+
+    assert client.runs.retry("683b").id == "684c"
+
+    first, second = api.requests
+    assert first.headers["Idempotency-Key"] == second.headers["Idempotency-Key"]
+
+
+def test_retry_and_wait(client: Lodol, api: FakeAPI, clock: FakeClock) -> None:
+    api.queue(
+        respond(202, retry_json()),
+        respond(200, run_json(execution_id="684c", status="running")),
+        respond(200, run_json(execution_id="684c", status="success")),
+        respond(200, run_json(execution_id="684c", status="success", steps=[])),
+    )
+
+    retry = client.runs.retry("683b", wait=True, timeout=600)
+
+    assert retry.succeeded and retry.steps == []
+    assert [api.sent(i)[1] for i in range(4)] == [
+        "/executions/683b/retry",
+        "/executions/684c",
+        "/executions/684c",
+        "/executions/684c",
+    ]
+    # A retry just queued isn't checked at once.
+    assert clock.sleeps == [1.0, 1.5]
+
+
+def test_a_retry_that_fails_again_raises(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    failed = run_json(execution_id="684c", status="failed", error="Sheet not found")
+    api.queue(respond(202, retry_json()), respond(200, failed), respond(200, failed))
+
+    with pytest.raises(RunFailedError, match="Run 684c failed: Sheet not found"):
+        client.runs.retry("683b", wait=True)
+
+
+def test_a_run_that_cant_be_retried_that_way_is_a_conflict(
+    client: Lodol, api: FakeAPI
+) -> None:
+    message = (
+        "This run failed before Lodol kept where runs fail, so it can only be "
+        "retried from the start."
+    )
+    api.queue(respond(409, {"error": message, "error_code": "run_not_retryable"}))
+
+    with pytest.raises(ConflictError) as exc:
+        client.runs.retry("683b")
+
+    assert exc.value.code == "run_not_retryable"
+    assert str(exc.value) == message
+    assert len(api.requests) == 1
+
+
+def test_a_retry_timeout_needs_wait(client: Lodol, api: FakeAPI) -> None:
+    with pytest.raises(ValueError, match="needs wait=True"):
+        client.runs.retry("683b", timeout=60)
+
+    assert api.requests == []
+
+
+@pytest.mark.parametrize(
+    ("options", "complaint"),
+    [
+        ({"wait": True, "timeout": -1}, "timeout must be 0 or more"),
+        ({"idempotency_key": " "}, "idempotency_key is empty"),
+    ],
+)
+def test_a_retry_is_checked_before_anything_is_sent(
+    client: Lodol, api: FakeAPI, options: dict[str, Any], complaint: str
+) -> None:
+    with pytest.raises(ValueError, match=complaint):
+        client.runs.retry("683b", **options)
+
+    assert api.requests == []
+
+
+def test_a_workflow_is_not_a_run_to_retry(client: Lodol) -> None:
+    with pytest.raises(TypeError, match="Expected a run id or a Run, not Workflow"):
+        client.runs.retry(Workflow(id="665f", name="x"))  # type: ignore[arg-type]
+
+
+def test_a_run_says_how_it_can_be_retried(client: Lodol, api: FakeAPI) -> None:
+    api.queue(
+        respond(
+            200,
+            run_json(
+                status="failed",
+                retry_of="682a",
+                retry_options={"from_start": True, "from_failed_step": False},
+            ),
+        )
+    )
+
+    run = client.runs.get("683b")
+
+    assert run.retry_of == "682a"
+    assert run.retry_options == RetryOptions(from_start=True, from_failed_step=False)
+
+
+# ── Waiting on a listener ────────────────────────────────────────────────
 
 
 def test_waiting_on_a_listening_workflow_returns_it(

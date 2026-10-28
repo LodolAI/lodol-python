@@ -34,7 +34,6 @@ from lodol.exceptions import (
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
-    ConcurrencyLimitError,
     ConfigurationError,
     ConflictError,
     InternalServerError,
@@ -70,6 +69,8 @@ def monotonic() -> float:
 # ── Requests and responses ──────────────────────────────────────────────
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# The writes the API takes an Idempotency-Key on.
+_KEYED_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
 QueryParams = Mapping[str, str | Sequence[str]]
 
@@ -81,16 +82,18 @@ class APIRequest:
     params: QueryParams | None = None
     body: Any = None
     idempotency_key: str | None = None
+    read_only: bool = False
+    """A POST that only reads, such as checking a workflow's program."""
 
     @property
     def resendable(self) -> bool:
         """Whether sending this again can't make anything happen twice: a
-        read, or a POST the server deduplicates by its Idempotency-Key. (The
-        API takes keys on POSTs only; a key on anything else protects
-        nothing.)"""
-        return self.method in _SAFE_METHODS or (
-            self.method == "POST" and self.idempotency_key is not None
-        )
+        read, or a POST, PUT or PATCH the server deduplicates by its
+        Idempotency-Key. (The API takes keys on those only; a key on a
+        DELETE protects nothing.)"""
+        if self.method in _SAFE_METHODS or self.read_only:
+            return True
+        return self.method in _KEYED_METHODS and self.idempotency_key is not None
 
     def describe(self) -> str:
         return f"{self.method} {self.path}"
@@ -127,6 +130,15 @@ def parse_rate_limit(headers: httpx2.Headers) -> RateLimit | None:
 
 def new_idempotency_key(action: str) -> str:
     return f"lodol-{action}-{uuid.uuid4()}"
+
+
+def idempotency_key_for(action: str, key: str | None) -> str:
+    """The caller's own idempotency key, checked before anything is sent, or
+    a new one for ``action`` when they gave none."""
+    if key is None:
+        return new_idempotency_key(action)
+    idempotency_key_header(key)
+    return key
 
 
 def idempotency_key_header(key: object) -> str:
@@ -335,8 +347,8 @@ def retry_delay_after_response(
     if status == 429:
         # Lodol checks its limits before doing anything, so a refused request
         # of any kind can be sent again. It marks the limits that clear by
-        # themselves (requests a minute) with Retry-After; the ones that
-        # don't (runs at once) are the answer.
+        # themselves (requests a minute) with Retry-After; a 429 without one
+        # is the answer.
         return retry_after
     if not request.resendable:
         return None
@@ -471,15 +483,6 @@ def status_error(response: httpx2.Response) -> APIStatusError:
                     body.get("resets_at") if isinstance(body, dict) else None
                 ),
                 limit=limit if isinstance(limit, int) else None,
-                code=code,
-                body=body,
-                response=response,
-            )
-        if code == "concurrency_limit":
-            return ConcurrencyLimitError(
-                message,
-                status_code=status,
-                retry_after=retry_after,
                 code=code,
                 body=body,
                 response=response,

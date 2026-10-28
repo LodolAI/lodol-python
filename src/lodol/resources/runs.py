@@ -1,10 +1,13 @@
-"""Runs: follow your workflows' runs, wait for one to finish, stop one, delete one."""
+"""Runs: follow your workflows' runs, wait for one to finish, retry, stop or
+delete one."""
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import warnings
-from typing import TYPE_CHECKING
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Generic, Iterable, TypeVar
 
 from lodol import _transport, constants
 from lodol._transport import (
@@ -13,6 +16,7 @@ from lodol._transport import (
     BaseClient,
     expect_list,
     expect_object,
+    idempotency_key_for,
     new_idempotency_key,
     path_id,
 )
@@ -26,7 +30,7 @@ from lodol.exceptions import (
     RunFailedError,
     WaitTimeoutError,
 )
-from lodol.models import DeletedRun, Run, Workflow
+from lodol.models import DeletedRun, Run, RunStatus, StepStatus, Workflow
 from lodol.pagination import AsyncPaginator, Paginator, check_limit
 from lodol.resources._common import object_id
 
@@ -35,12 +39,23 @@ if TYPE_CHECKING:  # pragma: no cover - only for type hints
 
 RunRef = str | Run
 WorkflowRef = str | Workflow
+# A list's query, beside its page size and cursor.
+Filters = dict[str, str | list[str]]
+# What a wait ends with.
+T = TypeVar("T")
 
 logger = logging.getLogger("lodol")
 
 # Trouble a wait rides out: it says nothing about the run, only that one look
 # at it didn't work out.
 _PASSING_TROUBLE = (APIConnectionError, InternalServerError, RateLimitError)
+
+# The statuses runs can be listed by: every one a run is kept in. A run reads
+# "stopping" only in what stopping it returns; Lodol lists it as running until
+# it has stopped, and would ignore "stopping" as a filter, listing every run.
+_LISTED_STATUSES = tuple(
+    status.value for status in RunStatus if status is not RunStatus.STOPPING
+)
 
 # A run that hasn't finished, as a sentence says it.
 _UNFINISHED = {
@@ -60,20 +75,39 @@ class Runs:
         self._client = client
 
     def list(
-        self, *, workflow: WorkflowRef | None = None, limit: int | None = None
+        self,
+        *,
+        workflow: WorkflowRef | None = None,
+        status: str | Iterable[str] | None = None,
+        started_from: dt.datetime | dt.date | None = None,
+        started_to: dt.datetime | dt.date | None = None,
+        search: str | None = None,
+        limit: int | None = None,
     ) -> Paginator[Run]:
-        """Runs, newest first: all of the workspace's, or one workflow's
-        (every version of it).
+        """Runs, newest first: all of the workspace's, or those that match.
+
+        - ``workflow``: one workflow's runs (every version of it).
+        - ``status``: runs in a status, or in any of several, given as
+          :class:`RunStatus` members or their text (``"failed"``). Any but
+          ``"stopping"``, which a run reads only as it is stopped, can be
+          given; anything else raises ``ValueError`` before anything is sent,
+          so a typo can't make the list every run.
+        - ``started_from`` and ``started_to``: runs that started at or after
+          ``started_from``, and before ``started_to``. A ``date`` is the start
+          of that day, UTC. A ``datetime`` without a timezone is sent as it
+          is, and Lodol reads it as UTC.
+        - ``search``: runs whose workflow's name, or a value in whose data
+          (what they started with, handed back or failed with), matches.
 
         Loop over the result; pages are fetched as you go. ``limit`` stops
         after that many runs. Listed runs leave out ``outputs`` and ``steps``:
         ``runs.get`` has them.
         """
-        workflow_id = _workflow_filter(workflow)
+        filters = _list_filters(workflow, status, started_from, started_to, search)
         limit = check_limit(limit)
 
         def fetch_page(cursor: str | None, size: int) -> tuple[list[Run], str | None]:
-            response = self._client._send(_list_request(workflow_id, cursor, size))
+            response = self._client._send(_list_request(filters, cursor, size))
             return _parse_page(response, size)
 
         return Paginator(fetch_page, limit=limit, noun="runs")
@@ -82,7 +116,7 @@ class Runs:
         """A run as it is now. ``include_steps`` adds what each step did."""
         run_id = object_id(run, Run, "run")
         response = self._client._send(_get_request(run_id, include_steps))
-        return _parse_run(response)
+        return parse_run(response)
 
     def wait(
         self,
@@ -105,36 +139,16 @@ class Runs:
         """
         run_id = object_id(run, Run, "run")
         known = run if isinstance(run, Run) else None
-        waiting = _Waiting(self._client, run_id, timeout, known, include_steps)
-        delay = waiting.first_delay()
-        while True:
-            if delay:
-                _transport.sleep(delay)
-            try:
-                response = self._client._send(
-                    _get_request(run_id, waiting.fetching_steps),
-                    max_retries=0,
-                    timeout=waiting.check_timeout(),
-                )
-                current = _parse_run(response)
-            except _PASSING_TROUBLE as exc:
-                next_delay = waiting.failed(exc)
-                if next_delay is None:
-                    if waiting.finished is None:
-                        raise
-                    return waiting.without_steps()
-                delay = next_delay
-            else:
-                next_delay = waiting.checked(current)
-                if next_delay is None:
-                    return waiting.result()
-                delay = next_delay
+        waiting = WaitingForRun(self._client, run_id, timeout, known, include_steps)
+        return poll(self._client, waiting)
 
     def stop(self, run: RunRef) -> Run:
         """Stop a run. Steps it already finished aren't undone.
 
-        Returns the run with status ``"stopping"`` or ``"stopped"``, or, if it
-        had already finished, as it finished.
+        Returns the run as ``runs.get`` gives it, with status ``"stopping"``
+        while it finishes the step it is on, or ``"stopped"``; or, if it had
+        already finished, as it finished. Any approval request it was
+        waiting on is withdrawn.
         """
         run_id = object_id(run, Run, "run")
         try:
@@ -143,7 +157,7 @@ class Runs:
             if not _already_finished(exc):
                 raise
             return self.get(run_id)
-        return _parse_run(response)
+        return parse_run(response)
 
     def delete(self, run: RunRef) -> DeletedRun:
         """Delete a finished run, and the runs it started. This can't be undone.
@@ -158,6 +172,40 @@ class Runs:
         response = self._client._send(_delete_request(object_id(run, Run, "run")))
         return _parse_deleted(response)
 
+    def retry(
+        self,
+        run: RunRef,
+        *,
+        from_start: bool = False,
+        wait: bool = False,
+        timeout: float | None = None,
+        idempotency_key: str | None = None,
+    ) -> Run:
+        """Retry a failed run, as a new run with the data it started with.
+
+        By default the retry picks up at the step that failed, without
+        running the steps before it again. ``from_start=True`` runs the
+        workflow again from the top instead. Either way it starts with the
+        failed run's data (its inputs, or the event its trigger caught), and
+        the new run's ``retry_of`` names the one it retries.
+
+        A run that can't be retried that way is refused with
+        ``ConflictError`` (code ``"run_not_retryable"``): one that didn't
+        fail, one a run calling its workflow started (retry that run
+        instead), or, from the failed step, one that failed before Lodol kept
+        where runs fail (retry it from the start). ``runs.get(run)`` says
+        which retries a run offers, in ``retry_options``.
+
+        ``wait``, ``timeout`` and ``idempotency_key`` work as they do for
+        ``workflows.run``: by default this returns as soon as the retry is
+        queued, and a retried request never starts a second retry.
+        """
+        request = _retry_request(run, from_start, wait, timeout, idempotency_key)
+        retry = _parse_retry(self._client._send(request))
+        if not wait:
+            return retry
+        return self.wait(retry, timeout=timeout)
+
 
 class AsyncRuns:
     """The runs of the workspace's workflows."""
@@ -166,24 +214,41 @@ class AsyncRuns:
         self._client = client
 
     def list(
-        self, *, workflow: WorkflowRef | None = None, limit: int | None = None
+        self,
+        *,
+        workflow: WorkflowRef | None = None,
+        status: str | Iterable[str] | None = None,
+        started_from: dt.datetime | dt.date | None = None,
+        started_to: dt.datetime | dt.date | None = None,
+        search: str | None = None,
+        limit: int | None = None,
     ) -> AsyncPaginator[Run]:
-        """Runs, newest first: all of the workspace's, or one workflow's
-        (every version of it).
+        """Runs, newest first: all of the workspace's, or those that match.
+
+        - ``workflow``: one workflow's runs (every version of it).
+        - ``status``: runs in a status, or in any of several, given as
+          :class:`RunStatus` members or their text (``"failed"``). Any but
+          ``"stopping"``, which a run reads only as it is stopped, can be
+          given; anything else raises ``ValueError`` before anything is sent,
+          so a typo can't make the list every run.
+        - ``started_from`` and ``started_to``: runs that started at or after
+          ``started_from``, and before ``started_to``. A ``date`` is the start
+          of that day, UTC. A ``datetime`` without a timezone is sent as it
+          is, and Lodol reads it as UTC.
+        - ``search``: runs whose workflow's name, or a value in whose data
+          (what they started with, handed back or failed with), matches.
 
         Loop over the result with ``async for``; pages are fetched as you go.
         ``limit`` stops after that many runs. Listed runs leave out
         ``outputs`` and ``steps``: ``runs.get`` has them.
         """
-        workflow_id = _workflow_filter(workflow)
+        filters = _list_filters(workflow, status, started_from, started_to, search)
         limit = check_limit(limit)
 
         async def fetch_page(
             cursor: str | None, size: int
         ) -> tuple[list[Run], str | None]:
-            response = await self._client._send(
-                _list_request(workflow_id, cursor, size)
-            )
+            response = await self._client._send(_list_request(filters, cursor, size))
             return _parse_page(response, size)
 
         return AsyncPaginator(fetch_page, limit=limit, noun="runs")
@@ -192,7 +257,7 @@ class AsyncRuns:
         """A run as it is now. ``include_steps`` adds what each step did."""
         run_id = object_id(run, Run, "run")
         response = await self._client._send(_get_request(run_id, include_steps))
-        return _parse_run(response)
+        return parse_run(response)
 
     async def wait(
         self,
@@ -215,36 +280,16 @@ class AsyncRuns:
         """
         run_id = object_id(run, Run, "run")
         known = run if isinstance(run, Run) else None
-        waiting = _Waiting(self._client, run_id, timeout, known, include_steps)
-        delay = waiting.first_delay()
-        while True:
-            if delay:
-                await _transport.async_sleep(delay)
-            try:
-                response = await self._client._send(
-                    _get_request(run_id, waiting.fetching_steps),
-                    max_retries=0,
-                    timeout=waiting.check_timeout(),
-                )
-                current = _parse_run(response)
-            except _PASSING_TROUBLE as exc:
-                next_delay = waiting.failed(exc)
-                if next_delay is None:
-                    if waiting.finished is None:
-                        raise
-                    return waiting.without_steps()
-                delay = next_delay
-            else:
-                next_delay = waiting.checked(current)
-                if next_delay is None:
-                    return waiting.result()
-                delay = next_delay
+        waiting = WaitingForRun(self._client, run_id, timeout, known, include_steps)
+        return await apoll(self._client, waiting)
 
     async def stop(self, run: RunRef) -> Run:
         """Stop a run. Steps it already finished aren't undone.
 
-        Returns the run with status ``"stopping"`` or ``"stopped"``, or, if it
-        had already finished, as it finished.
+        Returns the run as ``runs.get`` gives it, with status ``"stopping"``
+        while it finishes the step it is on, or ``"stopped"``; or, if it had
+        already finished, as it finished. Any approval request it was
+        waiting on is withdrawn.
         """
         run_id = object_id(run, Run, "run")
         try:
@@ -253,7 +298,7 @@ class AsyncRuns:
             if not _already_finished(exc):
                 raise
             return await self.get(run_id)
-        return _parse_run(response)
+        return parse_run(response)
 
     async def delete(self, run: RunRef) -> DeletedRun:
         """Delete a finished run, and the runs it started. This can't be undone.
@@ -268,15 +313,52 @@ class AsyncRuns:
         response = await self._client._send(_delete_request(object_id(run, Run, "run")))
         return _parse_deleted(response)
 
+    async def retry(
+        self,
+        run: RunRef,
+        *,
+        from_start: bool = False,
+        wait: bool = False,
+        timeout: float | None = None,
+        idempotency_key: str | None = None,
+    ) -> Run:
+        """Retry a failed run, as a new run with the data it started with.
 
-class _Waiting:
-    """What waiting for one run decides: when to check next, what to ask
-    for, and when to stop. The sync and async waits only do what it says.
+        By default the retry picks up at the step that failed, without
+        running the steps before it again. ``from_start=True`` runs the
+        workflow again from the top instead. Either way it starts with the
+        failed run's data (its inputs, or the event its trigger caught), and
+        the new run's ``retry_of`` names the one it retries.
 
-    A wait has two stages: checking, lightly, until the run has finished;
-    then, when step results are wanted, fetching them once. The deadline
-    bounds the first. The second only adds the steps to an outcome already
-    known, so when it can't, the outcome is returned without them.
+        A run that can't be retried that way is refused with
+        ``ConflictError`` (code ``"run_not_retryable"``): one that didn't
+        fail, one a run calling its workflow started (retry that run
+        instead), or, from the failed step, one that failed before Lodol kept
+        where runs fail (retry it from the start). ``runs.get(run)`` says
+        which retries a run offers, in ``retry_options``.
+
+        ``wait``, ``timeout`` and ``idempotency_key`` work as they do for
+        ``workflows.run``: by default this returns as soon as the retry is
+        queued, and a retried request never starts a second retry.
+        """
+        request = _retry_request(run, from_start, wait, timeout, idempotency_key)
+        retry = _parse_retry(await self._client._send(request))
+        if not wait:
+            return retry
+        return await self.wait(retry, timeout=timeout)
+
+
+class Waiting(ABC, Generic[T]):
+    """What waiting on one run decides: what to ask Lodol for next, when,
+    and when to stop. The sync and async loops (``poll`` and ``apoll``) only
+    do what it says, so every wait paces itself, rides out passing trouble
+    and keeps to its deadline the same way.
+
+    A wait checks on the run, lightly, until it has finished; then, when
+    step results are wanted, fetches them once. The deadline bounds the
+    first stage. The second only adds the steps to an outcome already known,
+    so when it can't, the outcome is returned without them. What the wait
+    ends with, and whether it ends sooner, is up to each kind of wait.
     """
 
     def __init__(
@@ -322,9 +404,25 @@ class _Waiting:
         remaining = self._deadline - _transport.monotonic()
         return min(timeout, max(remaining, constants.MIN_CHECK_TIMEOUT))
 
-    def checked(self, run: Run) -> float | None:
+    def next_request(self) -> APIRequest:
+        """What the next check asks Lodol for."""
+        return _get_request(self.run_id, self.fetching_steps)
+
+    def checked(self, response: APIResponse) -> float | None:
         """After a check that worked: seconds until the next one, or
         ``None`` when the wait is over (``result()`` has the answer)."""
+        return self._checked_run(parse_run(response))
+
+    @abstractmethod
+    def result(self) -> T:
+        """What the wait ends with, or why not, raised."""
+
+    @abstractmethod
+    def without_steps(self) -> T:
+        """What the wait ends with when the finished run's step results
+        can't be fetched."""
+
+    def _checked_run(self, run: Run) -> float | None:
         self._failing_since = None
         if self.finished is not None:
             self.latest = run if run.finished else self.finished
@@ -332,10 +430,12 @@ class _Waiting:
         self.latest = run
         self._looked = True
         if run.is_trigger_listener and not run.finished:
-            warn_listening(run, stacklevel=3)
+            # Called from checked(), from the loop, from the wait the
+            # caller called.
+            warn_listening(run, stacklevel=5)
             return None
         if run.finished:
-            if not self._include_steps:
+            if not self._wants_steps(run):
                 return None
             self.finished = run
             delay = self._paced(0.0, steady=False)
@@ -350,6 +450,14 @@ class _Waiting:
         if run.status != self._last_status:
             self._last_status = run.status
             logger.info("Run %s is %s", self.run_id, _describe(run.status))
+        return self._still_going(run)
+
+    def _wants_steps(self, run: Run) -> bool:
+        """Whether to fetch the step results of a run that has finished."""
+        return self._include_steps
+
+    def _still_going(self, run: Run) -> float:
+        """Seconds until the next check on a run that hasn't finished."""
         return self._before_deadline(self._paced(self._next_interval()))
 
     def failed(self, error: LodolError) -> float | None:
@@ -377,7 +485,7 @@ class _Waiting:
             return None if self._past_deadline_after(delay) else delay
         return self._before_deadline(delay)
 
-    def result(self) -> Run:
+    def _outcome(self) -> Run:
         """The finished run, if it succeeded; otherwise why not, raised. A
         workflow listening for its trigger is returned as it is."""
         assert self.latest is not None
@@ -385,7 +493,7 @@ class _Waiting:
             return self.latest
         return _succeeded(self.latest)
 
-    def without_steps(self) -> Run:
+    def _outcome_without_steps(self) -> Run:
         """The finished run as the check that saw it finish got it, when its
         step results can't be fetched."""
         assert self.finished is not None
@@ -443,6 +551,68 @@ class _Waiting:
         )
 
 
+class WaitingForRun(Waiting[Run]):
+    """Waiting for a run to finish (``runs.wait``)."""
+
+    def result(self) -> Run:
+        return self._outcome()
+
+    def without_steps(self) -> Run:
+        return self._outcome_without_steps()
+
+
+def poll(client: Lodol, waiting: Waiting[T]) -> T:
+    """Check on a run, as ``waiting`` says, until it says the wait is over."""
+    delay = waiting.first_delay()
+    while True:
+        if delay:
+            _transport.sleep(delay)
+        try:
+            response = client._send(
+                waiting.next_request(),
+                max_retries=0,
+                timeout=waiting.check_timeout(),
+            )
+        except _PASSING_TROUBLE as exc:
+            next_delay = waiting.failed(exc)
+            if next_delay is None:
+                if waiting.finished is None:
+                    raise
+                return waiting.without_steps()
+            delay = next_delay
+        else:
+            next_delay = waiting.checked(response)
+            if next_delay is None:
+                return waiting.result()
+            delay = next_delay
+
+
+async def apoll(client: AsyncLodol, waiting: Waiting[T]) -> T:
+    """Check on a run, as ``waiting`` says, until it says the wait is over."""
+    delay = waiting.first_delay()
+    while True:
+        if delay:
+            await _transport.async_sleep(delay)
+        try:
+            response = await client._send(
+                waiting.next_request(),
+                max_retries=0,
+                timeout=waiting.check_timeout(),
+            )
+        except _PASSING_TROUBLE as exc:
+            next_delay = waiting.failed(exc)
+            if next_delay is None:
+                if waiting.finished is None:
+                    raise
+                return waiting.without_steps()
+            delay = next_delay
+        else:
+            next_delay = waiting.checked(response)
+            if next_delay is None:
+                return waiting.result()
+            delay = next_delay
+
+
 def _retry_after(error: LodolError) -> float | None:
     if isinstance(error, RateLimitError):
         return error.retry_after
@@ -464,6 +634,16 @@ def warn_listening(run: Run, *, stacklevel: int) -> None:
     )
 
 
+def check_wait_options(wait: bool, timeout: float | None) -> None:
+    """The ``wait`` and ``timeout`` of a call that starts a run, checked
+    before anything is sent."""
+    if timeout is not None and not wait:
+        raise ValueError(
+            "timeout is how long to wait for the run to finish, so it needs wait=True"
+        )
+    check_wait_timeout(timeout)
+
+
 def check_wait_timeout(timeout: float | None) -> float | None:
     """A wait's ``timeout``, checked before anything is sent."""
     if timeout is None:
@@ -481,8 +661,9 @@ def _succeeded(run: Run) -> Run:
         return run
     if run.status == "stopped":
         raise RunFailedError(f"Run {run.id} was stopped before it finished", run=run)
+    # The step that failed it: not one that failed and was let carry on.
     failed_step = next(
-        (step for step in run.steps or [] if step.status == "failed"), None
+        (step for step in run.steps or [] if step.status == StepStatus.FAILED), None
     )
     reason = run.error or (failed_step.error if failed_step else None)
     raise RunFailedError(
@@ -494,16 +675,105 @@ def _describe(status: str) -> str:
     return _UNFINISHED.get(status, status)
 
 
-def _workflow_filter(workflow: WorkflowRef | None) -> str | None:
-    if workflow is None:
-        return None
-    return object_id(workflow, Workflow, "workflow")
+def _list_filters(
+    workflow: WorkflowRef | None,
+    status: str | Iterable[str] | None,
+    started_from: dt.datetime | dt.date | None,
+    started_to: dt.datetime | dt.date | None,
+    search: str | None,
+) -> Filters:
+    """What ``runs.list`` narrows the list to, as its query, checked before
+    anything is sent: Lodol ignores a filter it can't use, and would list
+    every run instead."""
+    filters: Filters = {}
+    if workflow is not None:
+        filters["workflow_id"] = object_id(workflow, Workflow, "workflow")
+    statuses = _status_filter(status)
+    if statuses:
+        filters["status"] = statuses
+    start = _start_bound(started_from, "started_from")
+    end = _start_bound(started_to, "started_to")
+    if start is not None and end is not None and _as_utc(end) <= _as_utc(start):
+        raise ValueError(
+            f"started_to ({end.isoformat()}) must be after started_from "
+            f"({start.isoformat()}): runs that started at started_to aren't listed"
+        )
+    if start is not None:
+        filters["from"] = start.isoformat()
+    if end is not None:
+        filters["to"] = end.isoformat()
+    if search is not None:
+        if not isinstance(search, str):
+            raise TypeError(f"search must be text, not {type(search).__name__}")
+        if not search.strip():
+            raise ValueError(
+                "search is empty: give the text to look for, or leave it out "
+                "to list every run"
+            )
+        filters["search"] = search.strip()
+    return filters
 
 
-def _list_request(workflow_id: str | None, cursor: str | None, size: int) -> APIRequest:
-    params = {"limit": str(size)}
-    if workflow_id is not None:
-        params["workflow_id"] = workflow_id
+def _status_filter(status: str | Iterable[str] | None) -> list[str]:
+    if status is None:
+        return []
+    if isinstance(status, str):
+        given = [status]
+    else:
+        try:
+            given = list(status)
+        except TypeError:
+            raise TypeError(
+                "status must be a status, or a list of them, not "
+                f"{type(status).__name__}"
+            ) from None
+        if not given:
+            raise ValueError(
+                "status is an empty list: name at least one status, or leave it "
+                "out to list runs in any status"
+            )
+    statuses: list[str] = []
+    for item in given:
+        if not isinstance(item, str):
+            raise TypeError(
+                f"Each status must be text or a RunStatus, not {type(item).__name__}"
+            )
+        value = item.value if isinstance(item, RunStatus) else item
+        if value not in _LISTED_STATUSES:
+            why = (
+                ": a run that is stopping is listed as 'running' until it has stopped"
+                if value == RunStatus.STOPPING.value
+                else ""
+            )
+            raise ValueError(
+                f"{value!r} isn't a status runs can be listed by{why}. Use one of "
+                f"{', '.join(map(repr, _LISTED_STATUSES))}."
+            )
+        if value not in statuses:
+            statuses.append(value)
+    return statuses
+
+
+def _start_bound(
+    value: dt.datetime | dt.date | None, name: str
+) -> dt.datetime | dt.date | None:
+    if value is None or isinstance(value, dt.date):
+        return value
+    raise TypeError(f"{name} must be a datetime or a date, not {type(value).__name__}")
+
+
+def _as_utc(value: dt.date) -> dt.datetime:
+    """A bound as Lodol reads it: a date is the start of that day, and a time
+    without a timezone is UTC."""
+    if not isinstance(value, dt.datetime):
+        return dt.datetime(value.year, value.month, value.day, tzinfo=dt.timezone.utc)
+    if value.utcoffset() is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value
+
+
+def _list_request(filters: Filters, cursor: str | None, size: int) -> APIRequest:
+    params: Filters = {"limit": str(size), **filters}
     if cursor is not None:
         params["after"] = cursor
     return APIRequest("GET", "/executions", params=params)
@@ -531,7 +801,7 @@ def _get_request(run_id: str, include_steps: bool) -> APIRequest:
     )
 
 
-def _parse_run(response: APIResponse) -> Run:
+def parse_run(response: APIResponse) -> Run:
     return Run.from_api(expect_object(response, "/executions/{execution_id}"))
 
 
@@ -540,6 +810,29 @@ def _stop_request(run_id: str) -> APIRequest:
         "POST",
         f"/executions/{path_id(run_id)}/stop",
         idempotency_key=new_idempotency_key("run-stop"),
+    )
+
+
+def _retry_request(
+    run: RunRef,
+    from_start: bool,
+    wait: bool,
+    timeout: float | None,
+    idempotency_key: str | None,
+) -> APIRequest:
+    run_id = object_id(run, Run, "run")
+    check_wait_options(wait, timeout)
+    return APIRequest(
+        "POST",
+        f"/executions/{path_id(run_id)}/retry",
+        body={"from": "start" if from_start else "failed_step"},
+        idempotency_key=idempotency_key_for("run-retry", idempotency_key),
+    )
+
+
+def _parse_retry(response: APIResponse) -> Run:
+    return Run.from_api(
+        expect_object(response, "POST /executions/{execution_id}/retry")
     )
 
 

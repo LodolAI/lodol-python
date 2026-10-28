@@ -142,6 +142,39 @@ def approval_json(**fields: Any) -> dict[str, Any]:
     }
 
 
+class ApprovalsServer:
+    """Answers ``GET /approvals`` as the server does: it reads a page of
+    requests, then leaves out those from workflows the key's member can't
+    see, and still says where the next page starts. Queue it once for each
+    page it should answer."""
+
+    def __init__(
+        self, approvals: list[dict[str, Any]], *, hidden_workflows: set[str]
+    ) -> None:
+        self.approvals = approvals  # newest first
+        self.hidden_workflows = hidden_workflows
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        params = request.url.params
+        rows = self.approvals
+        if "before" in params:
+            ids = [row["id"] for row in rows]
+            rows = rows[ids.index(params["before"]) + 1 :]
+        limit = int(params["limit"])
+        read = rows[:limit]
+        return respond(
+            200,
+            {
+                "approvals": [
+                    row
+                    for row in read
+                    if row["workflow_id"] not in self.hidden_workflows
+                ],
+                "next_before": read[-1]["id"] if len(read) == limit else None,
+            },
+        )
+
+
 @pytest.fixture
 def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[standin.Server]:
     """The stand-in Developer API, on a real socket on this machine."""

@@ -16,10 +16,14 @@ import lodol
 from lodol import (
     Approval,
     ApprovalStatus,
+    RetryOptions,
     Run,
     RunStatus,
+    Step,
+    StepStatus,
     WaitTimeoutError,
     Workflow,
+    WorkflowCheck,
     WorkflowInput,
     WorkflowOutput,
 )
@@ -59,6 +63,35 @@ def test_statuses_compare_as_text() -> None:
     assert run.status == RunStatus.AWAITING_APPROVAL
     assert f"{RunStatus.SUCCESS}" == "success"
     assert str(ApprovalStatus.EXPIRED) == "expired"
+    assert Step(index=0, status="continued").status == StepStatus.CONTINUED
+    assert str(StepStatus.SKIPPED) == "skipped"
+
+
+def test_a_step_says_how_it_went() -> None:
+    retried, continued, skipped = (
+        Step.from_api(step)
+        for step in [
+            {"index": 0, "status": "completed", "result": {"rows": 3}, "attempts": 2},
+            {
+                "index": 1,
+                "status": "continued",
+                "result": None,
+                "error": "Slack didn't answer",
+            },
+            {"index": 2, "status": "skipped", "reason": "This step is turned off."},
+        ]
+    )
+
+    assert retried == Step(index=0, status="completed", result={"rows": 3}, attempts=2)
+    assert continued.status == StepStatus.CONTINUED
+    assert continued.error == "Slack didn't answer" and continued.attempts is None
+    assert skipped == Step(index=2, status="skipped", reason="This step is turned off.")
+    assert skipped.result is None
+
+
+@pytest.mark.parametrize("attempts", [True, "2", 2.0, None])
+def test_attempts_that_arent_a_count_are_left_out(attempts: object) -> None:
+    assert Step.from_api({"index": 0, "attempts": attempts}).attempts is None
 
 
 @pytest.mark.parametrize(
@@ -250,6 +283,40 @@ def test_a_run_without_outputs_has_none() -> None:
     assert Run.from_api({"execution_id": "683b", "outputs": None}).outputs == {}
 
 
+def test_a_run_says_whether_it_is_a_retry_and_how_it_can_be_retried() -> None:
+    run = Run.from_api(
+        {
+            "execution_id": "684c",
+            "status": "failed",
+            "retry_of": "683b",
+            "retry_options": {"from_start": True, "from_failed_step": True},
+        }
+    )
+
+    assert run.retry_of == "683b"
+    assert run.retry_options == RetryOptions(from_start=True, from_failed_step=True)
+    assert {run, run} == {run}
+
+
+def test_a_run_that_doesnt_say_how_it_can_be_retried() -> None:
+    # As a list gives it: neither field.
+    listed = Run.from_api({"execution_id": "683b", "status": "failed"})
+    # As a run that isn't a retry, and didn't fail, is given alone.
+    alone = Run.from_api(
+        {
+            "execution_id": "683b",
+            "status": "success",
+            "retry_of": None,
+            "retry_options": {"from_start": False, "from_failed_step": False},
+        }
+    )
+
+    assert listed.retry_of is None and listed.retry_options is None
+    assert alone.retry_of is None
+    assert alone.retry_options == RetryOptions()
+    assert RetryOptions.from_api({}) == RetryOptions(False, False)
+
+
 def test_a_listener_is_marked() -> None:
     run = Run.from_api(
         {"execution_id": "683b", "status": "running", "is_trigger_listener": True}
@@ -257,6 +324,38 @@ def test_a_listener_is_marked() -> None:
 
     assert run.is_trigger_listener
     assert not run.finished
+
+
+def test_a_workflow_just_saved_says_what_it_needs() -> None:
+    saved = Workflow.from_api(
+        {
+            "id": "665f",
+            "name": "Say hello",
+            "version_id": "6690",
+            "url": "https://app.lodol.com/create?programId=665f",
+            "apps_to_connect": ["Gmail", "Slack"],
+            "trigger_paused": True,
+        }
+    )
+    looked_up = Workflow.from_api(
+        {"id": "665f", "name": "x", "apps_to_connect": "Gmail", "trigger_paused": 1}
+    )
+
+    assert saved.version_id == "6690"
+    assert saved.url == "https://app.lodol.com/create?programId=665f"
+    assert saved.apps_to_connect == ["Gmail", "Slack"]
+    assert saved.trigger_paused is True
+    assert {saved, saved} == {saved}
+    # What isn't said, or can't be read, is None: not "nothing to connect".
+    assert looked_up.version_id is None and looked_up.url is None
+    assert looked_up.apps_to_connect is None and looked_up.trigger_paused is None
+
+
+def test_a_check_tolerates_a_sparse_answer() -> None:
+    check = WorkflowCheck.from_api({"valid": "yes", "warnings": [], "actions": "x"})
+
+    assert check == WorkflowCheck(valid=False)
+    assert WorkflowCheck.from_api({"valid": True}).valid
 
 
 def test_a_workflow_says_what_it_hands_back() -> None:

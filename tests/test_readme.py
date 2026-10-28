@@ -18,7 +18,7 @@ README = Path(__file__).resolve().parent.parent / "README.md"
 EXAMPLES = re.findall(r"```python\n(.*?)```", README.read_text(), flags=re.S)
 
 # The README's placeholder ids, as the stand-in knows them.
-IDS = {"665f...": "665f", "683b...": "r1"}
+IDS = {"665f...": "665f", "683b...": "r1", "5c3d...": "5c3d", "4e8d...": "4e8d"}
 
 
 def test_the_readme_has_examples() -> None:

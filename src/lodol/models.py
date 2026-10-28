@@ -45,6 +45,26 @@ FINISHED_STATUSES = frozenset(
 )
 
 
+class StepStatus(str, Enum):
+    """How a step of a run went. ``Step.status`` holds one of these values as
+    text, so ``step.status == "failed"`` and ``step.status ==
+    StepStatus.FAILED`` agree. A status this version doesn't list may still
+    appear, as text."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    """It failed. ``Step.error`` says why."""
+    CONTINUED = "continued"
+    """It failed, but its setting let the run carry on. ``Step.error`` says
+    what went wrong."""
+    SKIPPED = "skipped"
+    """It is turned off, so the run passed over it. ``Step.reason`` says so,
+    and it has no ``result``."""
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+
 class ApprovalStatus(str, Enum):
     """Where an approval request is. ``Approval.status`` holds one of these
     values as text."""
@@ -110,6 +130,11 @@ class Workflow:
 
     ``id`` stays the same when the workflow is edited, so it is safe to store
     and run later. A draft (``is_draft``) can't be run until it is published.
+
+    A workflow just saved (by ``workflows.create``, ``update`` or ``edit``)
+    also says which version the save made, where to open it, and what it
+    still needs; a workflow looked up or listed has ``None`` for those. A
+    note on anything Lodol filled in as it saved is in ``raw["note"]``.
     """
 
     id: str
@@ -119,13 +144,30 @@ class Workflow:
     outputs: list[WorkflowOutput] = field(default_factory=list, hash=False)
     """What a run that succeeds hands back, in ``Run.outputs``."""
     is_draft: bool = False
+    starts_from_trigger: bool = False
+    """Whether it starts from its own trigger or schedule. Running it only
+    sets it listening (``Run.is_trigger_listener``), and each event it
+    catches starts a run of its own."""
     created_by: str | None = None
     created_at: dt.datetime | None = None
     updated_at: dt.datetime | None = None
     last_run_at: dt.datetime | None = None
     program: dict[str, Any] | None = field(default=None, repr=False, hash=False)
-    """The workflow's steps, as Lodol stores them. Only ``workflows.get``
-    includes it."""
+    """The workflow's steps, as Lodol stores them. ``workflows.get`` and a
+    save include it; ``workflows.list`` doesn't."""
+    version_id: str | None = None
+    """The version the save wrote, as ``Run.version_id`` names the version
+    that ran: a new one, or, for an edit soon after the last save, the one
+    it saved over. Only a save says."""
+    url: str | None = None
+    """Where to open it in Lodol. Only a save says."""
+    apps_to_connect: list[str] | None = field(default=None, hash=False)
+    """The apps it uses that the key's member has yet to connect in Lodol,
+    which it can't run without. Only a save says."""
+    trigger_paused: bool | None = None
+    """Whether saving the change paused its trigger: it was listening, and
+    listens again, on the new version, once it is run. Only ``update`` and
+    ``edit`` say."""
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -134,6 +176,8 @@ class Workflow:
         program = raw.get("program")
         inputs = raw.get("inputs")
         outputs = raw.get("outputs")
+        apps = raw.get("apps_to_connect")
+        trigger_paused = raw.get("trigger_paused")
         return cls(
             id=str(raw.get("id") or ""),
             name=str(raw.get("name") or ""),
@@ -151,11 +195,61 @@ class Workflow:
             # Only an explicit draft is one: a workflow from before drafts
             # existed has no publish state, and runs.
             is_draft=raw.get("publish_state") == "draft",
+            starts_from_trigger=bool(raw.get("starts_from_trigger")),
             created_by=_optional_str(raw.get("created_by")),
             created_at=parse_datetime(raw.get("created_at")),
             updated_at=parse_datetime(raw.get("updated_at")),
             last_run_at=parse_datetime(raw.get("last_run_at")),
             program=program if isinstance(program, dict) else None,
+            version_id=_optional_str(raw.get("version_id")),
+            url=_optional_str(raw.get("url")),
+            apps_to_connect=(
+                [str(app) for app in apps] if isinstance(apps, list) else None
+            ),
+            trigger_paused=(
+                trigger_paused if isinstance(trigger_paused, bool) else None
+            ),
+            raw=raw,
+        )
+
+
+@dataclass(frozen=True)
+class WorkflowCheck:
+    """What ``workflows.validate`` made of a program: whether Lodol could
+    save it, and if not, what to fix (``error``).
+
+    ``raw`` has the rest of what Lodol said about a valid one: a dry run of
+    it against mocked apps (``raw["preview"]``), its steps described
+    (``raw["steps"]``), and a note on anything it would fill in as it saved
+    it (``raw["note"]``).
+    """
+
+    valid: bool
+    error: str | None = None
+    """What to fix, when it isn't valid."""
+    warnings: dict[str, Any] = field(default_factory=dict, hash=False)
+    """Likely mistakes in a valid program, by kind, such as ``"warning"``
+    for one that would do nothing."""
+    starts_from_trigger: bool = False
+    """Whether it starts from its own trigger or schedule."""
+    actions: list[str] = field(default_factory=list, hash=False)
+    """The actions it calls, by path, such as
+    ``"/actions/library/slack/send-message"``."""
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_api(cls, data: Mapping[str, Any]) -> WorkflowCheck:
+        raw = dict(data)
+        warnings = raw.get("warnings")
+        actions = raw.get("actions")
+        return cls(
+            valid=raw.get("valid") is True,
+            error=_optional_str(raw.get("error")),
+            warnings=dict(warnings) if isinstance(warnings, Mapping) else {},
+            starts_from_trigger=bool(raw.get("has_trigger")),
+            actions=(
+                [str(action) for action in actions] if isinstance(actions, list) else []
+            ),
             raw=raw,
         )
 
@@ -205,18 +299,54 @@ class Step:
 
     index: int
     status: str
-    """``"completed"`` or ``"failed"``. A step inside a loop reports its last pass."""
+    """One of :class:`StepStatus`, as text. A step inside a loop reports its
+    last pass."""
     result: Any = field(default=None, hash=False)
     error: Any = field(default=None, hash=False)
+    """What went wrong, for a step that failed or carried on after failing."""
+    reason: str | None = None
+    """Why a skipped step didn't run."""
+    attempts: int | None = None
+    """How many tries the step took, when it retried. ``None`` when Lodol
+    didn't say."""
 
     @classmethod
     def from_api(cls, data: Mapping[str, Any]) -> Step:
         index = data.get("index")
+        attempts = data.get("attempts")
         return cls(
             index=index if isinstance(index, int) else -1,
             status=str(data.get("status") or ""),
             result=data.get("result"),
             error=data.get("error"),
+            reason=_optional_str(data.get("reason")),
+            attempts=(
+                attempts
+                if isinstance(attempts, int) and not isinstance(attempts, bool)
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class RetryOptions:
+    """Which retries a run offers (see ``runs.retry``). A run that didn't
+    fail offers neither."""
+
+    from_start: bool = False
+    """Whether it can be run again from the top, with the data it started
+    with. Any failed run can, except one a run calling its workflow started:
+    retry that run instead."""
+    from_failed_step: bool = False
+    """Whether it can pick up at the step that failed, without running the
+    steps before it again. A run that failed before Lodol kept where runs
+    fail can't."""
+
+    @classmethod
+    def from_api(cls, data: Mapping[str, Any]) -> RetryOptions:
+        return cls(
+            from_start=bool(data.get("from_start")),
+            from_failed_step=bool(data.get("from_failed_step")),
         )
 
 
@@ -248,6 +378,13 @@ class Run:
     schedule, listening. It never finishes on its own: each event it catches
     starts a run of its own, listed with the rest. Its status reads
     ``"running"`` while it listens."""
+    retry_of: str | None = None
+    """The id of the run this one retried, when it is a retry. ``None``
+    otherwise, and in ``runs.list``, which doesn't say."""
+    retry_options: RetryOptions | None = None
+    """Which retries this run offers, if it failed. ``None`` when the
+    response didn't say: ``runs.get`` and ``runs.wait`` say, ``runs.list``
+    doesn't."""
     created_at: dt.datetime | None = None
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
@@ -269,6 +406,7 @@ class Run:
         raw = dict(data)
         steps = raw.get("steps")
         outputs = raw.get("outputs")
+        retry_options = raw.get("retry_options")
         return cls(
             id=str(raw.get("execution_id") or raw.get("id") or ""),
             status=str(raw.get("status") or ""),
@@ -278,6 +416,12 @@ class Run:
             error=_optional_str(raw.get("error")),
             outputs=dict(outputs) if isinstance(outputs, Mapping) else {},
             is_trigger_listener=bool(raw.get("is_trigger_listener")),
+            retry_of=_optional_str(raw.get("retry_of")),
+            retry_options=(
+                RetryOptions.from_api(retry_options)
+                if isinstance(retry_options, Mapping)
+                else None
+            ),
             created_at=parse_datetime(raw.get("created_at")),
             started_at=parse_datetime(raw.get("started_at")),
             completed_at=parse_datetime(raw.get("completed_at")),
