@@ -44,14 +44,18 @@ class Workflows:
         return Workflow.from_api(expect_object(response, "GET /workflows/{id}"))
 
     def validate(self, program: Mapping[str, Any]) -> WorkflowCheck:
-        """Check a program without saving it: whether Lodol could save it,
-        and if not, what to fix (``check.error``).
+        """Check a program without saving it: whether it is valid in the
+        workspace, and if not, what to fix (``check.error``).
 
         ``program`` is a workflow's steps, as Lodol stores them
-        (``Workflow.program``). For one it could save, ``check.warnings``
-        names likely mistakes, and ``check.raw["preview"]`` has a dry run of
-        it against mocked apps. Nothing is saved or run. Needs a key with the
+        (``Workflow.program``). For a valid one, ``check.warnings`` names
+        likely mistakes, and ``check.raw["preview"]`` has a dry run of it
+        against mocked apps. Nothing is saved or run. Needs a key with the
         ``workflows:write`` scope.
+
+        It doesn't check what the key's member may use (connections, and the
+        workflows it calls), as saving does, so a program that passes can
+        still be refused by ``create``, ``update`` or ``edit``.
         """
         response = self._client._send(_validate_request(program))
         return _parse_check(response)
@@ -85,8 +89,10 @@ class Workflows:
         description: str | None = None,
     ) -> Workflow:
         """Replace a workflow's steps (``program``), its name or its
-        description, saved as a new version of it. What's left out stays as
-        it is.
+        description. What's left out stays as it is. It is saved as an edit
+        in Lodol is: as a new version, or, when the workflow was saved within
+        the last few minutes, over that version, whose ``version_id`` then
+        stays the same.
 
         A program Lodol can't save, or one with no steps for a workflow that
         has some, is refused with ``BadRequestError`` (code
@@ -109,8 +115,8 @@ class Workflows:
         description: str | None = None,
     ) -> Workflow:
         """Change a workflow's steps with JSON Patch ``operations``, applied
-        in order to its program as it is now, and saved as a new version of
-        it, with a new ``name`` or ``description`` if given.
+        in order to its program as it is now, with a new ``name`` or
+        ``description`` if given.
 
         Each operation is a dict such as ``{"op": "replace", "path":
         "/body/0/...", "value": ...}``, with ``"op"`` ``"replace"``,
@@ -198,14 +204,18 @@ class AsyncWorkflows:
         return Workflow.from_api(expect_object(response, "GET /workflows/{id}"))
 
     async def validate(self, program: Mapping[str, Any]) -> WorkflowCheck:
-        """Check a program without saving it: whether Lodol could save it,
-        and if not, what to fix (``check.error``).
+        """Check a program without saving it: whether it is valid in the
+        workspace, and if not, what to fix (``check.error``).
 
         ``program`` is a workflow's steps, as Lodol stores them
-        (``Workflow.program``). For one it could save, ``check.warnings``
-        names likely mistakes, and ``check.raw["preview"]`` has a dry run of
-        it against mocked apps. Nothing is saved or run. Needs a key with the
+        (``Workflow.program``). For a valid one, ``check.warnings`` names
+        likely mistakes, and ``check.raw["preview"]`` has a dry run of it
+        against mocked apps. Nothing is saved or run. Needs a key with the
         ``workflows:write`` scope.
+
+        It doesn't check what the key's member may use (connections, and the
+        workflows it calls), as saving does, so a program that passes can
+        still be refused by ``create``, ``update`` or ``edit``.
         """
         response = await self._client._send(_validate_request(program))
         return _parse_check(response)
@@ -239,8 +249,10 @@ class AsyncWorkflows:
         description: str | None = None,
     ) -> Workflow:
         """Replace a workflow's steps (``program``), its name or its
-        description, saved as a new version of it. What's left out stays as
-        it is.
+        description. What's left out stays as it is. It is saved as an edit
+        in Lodol is: as a new version, or, when the workflow was saved within
+        the last few minutes, over that version, whose ``version_id`` then
+        stays the same.
 
         A program Lodol can't save, or one with no steps for a workflow that
         has some, is refused with ``BadRequestError`` (code
@@ -263,8 +275,8 @@ class AsyncWorkflows:
         description: str | None = None,
     ) -> Workflow:
         """Change a workflow's steps with JSON Patch ``operations``, applied
-        in order to its program as it is now, and saved as a new version of
-        it, with a new ``name`` or ``description`` if given.
+        in order to its program as it is now, with a new ``name`` or
+        ``description`` if given.
 
         Each operation is a dict such as ``{"op": "replace", "path":
         "/body/0/...", "value": ...}``, with ``"op"`` ``"replace"``,

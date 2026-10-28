@@ -156,8 +156,9 @@ class Workflow:
     """The workflow's steps, as Lodol stores them. ``workflows.get`` and a
     save include it; ``workflows.list`` doesn't."""
     version_id: str | None = None
-    """The version a save made, as ``Run.version_id`` names the version
-    that ran. Only a save says."""
+    """The version the save wrote, as ``Run.version_id`` names the version
+    that ran: a new one, or, for an edit soon after the last save, the one
+    it saved over. Only a save says."""
     url: str | None = None
     """Where to open it in Lodol. Only a save says."""
     apps_to_connect: list[str] | None = field(default=None, hash=False)
