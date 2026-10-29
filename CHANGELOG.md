@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-29)
 
 The SDK, redesigned for production use, and its first release on PyPI. 0.1 was only ever installable from GitHub; if you used it, see [Upgrading from 0.1](#upgrading-from-01).
 
