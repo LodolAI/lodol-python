@@ -96,9 +96,12 @@ class Workflows:
 
         A program Lodol can't save, or one with no steps for a workflow that
         has some, is refused with ``BadRequestError`` (code
-        ``"invalid_workflow"``), and nothing changes. Saving pauses the
-        trigger of a workflow that was listening (``trigger_paused`` says
-        so): run it again to set it listening on the new version.
+        ``"invalid_workflow"``), and nothing changes. A workflow that's on
+        stays on, listening with the new version, when the member who made
+        the key turned it on, or when only its name or description changes.
+        A save that turns it off, such as another member's change to its
+        steps, sets ``trigger_paused``: run it again to set it listening on
+        the new version.
 
         Needs a key with the ``workflows:write`` scope, made by a member
         allowed to edit it. A retried request never saves it twice.
@@ -256,9 +259,12 @@ class AsyncWorkflows:
 
         A program Lodol can't save, or one with no steps for a workflow that
         has some, is refused with ``BadRequestError`` (code
-        ``"invalid_workflow"``), and nothing changes. Saving pauses the
-        trigger of a workflow that was listening (``trigger_paused`` says
-        so): run it again to set it listening on the new version.
+        ``"invalid_workflow"``), and nothing changes. A workflow that's on
+        stays on, listening with the new version, when the member who made
+        the key turned it on, or when only its name or description changes.
+        A save that turns it off, such as another member's change to its
+        steps, sets ``trigger_paused``: run it again to set it listening on
+        the new version.
 
         Needs a key with the ``workflows:write`` scope, made by a member
         allowed to edit it. A retried request never saves it twice.

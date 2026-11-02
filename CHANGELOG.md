@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`trigger_paused` says whether the save turned the workflow off.** A workflow that's on stays on through a save by the member who turned it on, or one that only renames it, but Lodol answered `trigger_paused=True` for any workflow that was on. It now answers `True` only when the save turned it off, once Lodol has LodolAI/lodol#4995. The SDK passes the value through unchanged.
+
 ## 0.2.0 (2026-10-29)
 
 The SDK, redesigned for production use, and its first release on PyPI. 0.1 was only ever installable from GitHub; if you used it, see [Upgrading from 0.1](#upgrading-from-01).
