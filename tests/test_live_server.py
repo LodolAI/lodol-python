@@ -296,9 +296,9 @@ def test_a_saved_workflow_that_was_listening(server: Server) -> None:
 
         saved = lodol.workflows.update(workflow, description="Each new invoice")
 
-        assert saved.trigger_paused is True
-        assert lodol.runs.get(listening).status == "stopped"
-        # Not listening any more, so nothing left to pause.
+        # The key's member turned it on, so saving keeps it listening.
+        assert saved.trigger_paused is False
+        assert lodol.runs.get(listening).status == "running"
         assert lodol.workflows.update(workflow, name="Invoices").trigger_paused is False
 
 

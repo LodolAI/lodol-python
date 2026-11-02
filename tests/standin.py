@@ -584,16 +584,9 @@ class Handler(BaseHTTPRequestHandler):
             description = _description(body.get("description"))
         except _Refused as refused:
             return 400, refused.body
-        # Saving pauses the trigger of a workflow that was listening.
-        listening = [
-            run
-            for run in state.runs
-            if run["workflow_id"] == workflow_id
-            and run["listening"]
-            and run["status"] == "running"
-        ]
-        for run in listening:
-            run["status"] = "stopped"
+        # The stand-in's key belongs to the member who turned the workflow
+        # on, so a save keeps it listening, on the new version, as Lodol
+        # does: trigger_paused is true only when a save turns it off.
         workflow["versions"] = workflow.get("versions", 1) + 1
         workflow["updated_at"] = "2026-10-27T12:30:00+00:00"
         if name is not None:
@@ -602,7 +595,7 @@ class Handler(BaseHTTPRequestHandler):
             workflow["description"] = description
         if program is not None:
             _set_program(workflow, program)
-        return 200, self._saved(state, workflow, trigger_paused=bool(listening))
+        return 200, self._saved(state, workflow, trigger_paused=False)
 
     @staticmethod
     def _saved(

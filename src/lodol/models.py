@@ -165,9 +165,9 @@ class Workflow:
     """The apps it uses that the key's member has yet to connect in Lodol,
     which it can't run without. Only a save says."""
     trigger_paused: bool | None = None
-    """Whether saving the change paused its trigger: it was listening, and
-    listens again, on the new version, once it is run. Only ``update`` and
-    ``edit`` say."""
+    """Whether saving the change turned the workflow off: it was listening,
+    and listens again, on the new version, once it is run. ``False`` when it
+    stayed on or wasn't on. Only ``update`` and ``edit`` say."""
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
