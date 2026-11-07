@@ -47,7 +47,7 @@ Changelog = "https://github.com/LodolAI/lodol-python/blob/main/CHANGELOG.md"
 # supported Python matrix (3.10–3.15) exercised in CI. Async tests run on
 # anyio's own pytest plugin, which comes with anyio, under asyncio and trio.
 test = [
-    "pytest>=8",
+    "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
     "trio>=0.34.0",
 ]
