@@ -442,6 +442,13 @@ class Decision:
     """``"approved"``, ``"rejected"`` or ``"replied"``."""
     comment: str = ""
     reply: str = ""
+    answer: str = ""
+    """The button pressed, as the request labels it: ``"Approve"`` or
+    ``"Reject"`` on an approval, one of the request's own ``buttons``
+    otherwise (or the one pressed for them when time ran out); ``""`` for a
+    written reply."""
+    draft: str = ""
+    """The request's text as the person left it, when they changed it."""
     decided_by: str = ""
     """Who answered: a person's name (or email), ``"API key '…'"`` for an
     answer sent through the API, or ``"Lodol"`` when a time limit decided."""
@@ -459,6 +466,8 @@ class Decision:
             decision=str(data.get("decision") or ""),
             comment=str(data.get("comment") or ""),
             reply=str(data.get("reply") or ""),
+            answer=str(data.get("answer") or ""),
+            draft=str(data.get("draft") or ""),
             decided_by=who,
             decided_at=parse_datetime(data.get("decided_at")),
             via=_optional_str(data.get("via")),
@@ -469,9 +478,11 @@ class Decision:
 class Approval:
     """A run asking for an answer before it carries on.
 
-    ``kind`` says what answer it needs: ``"approval"`` is approved or
-    rejected, ``"reply"`` is answered in writing. The run waits, with status
-    ``awaiting_approval``, until it gets one.
+    It is answered by pressing one of its ``buttons``, with as much writing
+    as ``written_answer`` asks for: an approval's are ``"Approve"`` and
+    ``"Reject"``; a request with no buttons asks for a written reply alone.
+    ``kind`` is ``"approval"`` for an approval and ``"reply"`` otherwise. The
+    run waits, with status ``awaiting_approval``, until it gets an answer.
     """
 
     id: str
@@ -487,6 +498,16 @@ class Approval:
     created_at: dt.datetime | None = None
     expires_at: dt.datetime | None = None
     decision: Decision | None = None
+    buttons: tuple[str, ...] = ()
+    """What the person presses to answer. Empty for a request that asks for
+    a written reply."""
+    written_answer: str = "optional"
+    """How much they write alongside: ``"none"``, ``"optional"`` or
+    ``"required"``."""
+    draft: str = ""
+    """Text the person can change before they answer, as the step gave it."""
+    timeout_answer: str = ""
+    """The button pressed for them if nobody answers in time, if any."""
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
@@ -499,9 +520,17 @@ class Approval:
         raw = dict(data)
         decision = raw.get("decision")
         step_index = raw.get("step_index")
+        kind = str(raw.get("kind") or "approval")
+        buttons = raw.get("buttons")
+        if not isinstance(buttons, list):
+            # From a Lodol older than buttons: the kind says.
+            buttons = [] if kind == "reply" else ["Approve", "Reject"]
+        written = raw.get("written_answer")
+        if not isinstance(written, str) or not written:
+            written = "required" if kind == "reply" else "optional"
         return cls(
             id=str(raw.get("id") or ""),
-            kind=str(raw.get("kind") or "approval"),
+            kind=kind,
             status=str(raw.get("status") or ""),
             title=str(raw.get("title") or ""),
             details=str(raw.get("details") or ""),
@@ -514,6 +543,10 @@ class Approval:
             decision=(
                 Decision.from_api(decision) if isinstance(decision, Mapping) else None
             ),
+            buttons=tuple(str(label) for label in buttons),
+            written_answer=written,
+            draft=str(raw.get("draft") or ""),
+            timeout_answer=str(raw.get("timeout_answer") or ""),
             raw=raw,
         )
 

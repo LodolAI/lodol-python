@@ -140,7 +140,7 @@ Deleting a run removes it from the history, as deleting it in Lodol does, along 
 
 ## Answer approvals
 
-A workflow's **Request approval** step pauses its run until someone answers. Your own system can answer instead of a person in Lodol:
+A workflow's **Ask a person** step (**Request approval** in older workflows and Lodol Gov) pauses its run until someone answers. Your own system can answer instead of a person in Lodol:
 
 ```python
 run = lodol.workflows.run("4e8d...")
@@ -162,14 +162,29 @@ To answer whatever is waiting, from any run:
 for approval in lodol.approvals.list():  # pending ones, newest first
     print(approval.title, approval.details, approval.workflow_name)
 
-    if approval.kind == "reply":
-        lodol.approvals.reply(approval, "The PO number is 4471")
-    else:
+    if approval.kind == "approval":
         lodol.approvals.approve(approval, comment="Matches the purchase order")
         # or lodol.approvals.reject(approval, comment="Wrong amount")
+    elif approval.buttons:
+        lodol.approvals.answer(approval, approval.buttons[0])
+    else:
+        lodol.approvals.reply(approval, "The PO number is 4471")
 ```
 
-The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how. `approvals.list(run=...)` lists one run's requests, and `workflow=` one workflow's.
+A request with buttons of its own (`approval.buttons`, such as `("Post it", "Skip")` or just `("Submit",)`) is answered by pressing one with `answer`. `approval.written_answer` says whether it takes writing alongside (`"none"`, `"optional"` or `"required"`), sent as `reply=`, and a request that carries text to check (`approval.draft`) takes it back changed as `draft=`:
+
+```python
+lodol.approvals.answer(
+    approval,
+    "Post it",
+    reply="Ship it Friday",
+    draft=approval.draft.replace("[3]", "41"),
+)
+```
+
+The run reads the button pressed as `answer`. An approval's buttons are `"Approve"` and `"Reject"`, so `answer` works on one too.
+
+The run carries on as soon as it's answered. An answer sent with an API key is recorded as that key's. `approvals.list(status="all")` includes answered requests, with `approval.decision` saying who answered, when and how, and the button pressed (`decision.answer`). `approvals.list(run=...)` lists one run's requests, and `workflow=` one workflow's.
 
 A request that's no longer pending can't be answered: you get `ConflictError`, whose `code` says what happened to it. `"approval_already_answered"`: someone answered it first. `"approval_expired"`: nobody answered in time, so it closed, or the step's time limit decided it automatically. `"approval_withdrawn"`: the run was stopped, or its workflow deleted, before anyone answered.
 

@@ -284,6 +284,15 @@ async def test_approvals(aclient: AsyncLodol, api: FakeAPI) -> None:
     assert api.body(3) == {"reply": "4471"}
 
 
+async def test_answer_presses_a_button(aclient: AsyncLodol, api: FakeAPI) -> None:
+    api.queue(respond(200, approval_json(kind="reply", status="replied")))
+
+    answered = await aclient.approvals.answer("a1", "Submit", reply="Done")
+
+    assert answered.status == "replied"
+    assert api.body() == {"answer": "Submit", "reply": "Done"}
+
+
 async def test_approvals_page_past_what_the_key_cant_see(
     aclient: AsyncLodol, api: FakeAPI
 ) -> None:

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### New
+
+- **Requests with buttons of their own.** Lodol's Ask a person step (Request approval, before) can offer any buttons, such as a single Submit or Post it and Skip, with a written answer that's optional, required or left out, and text the person can change before they answer. `approvals.answer(approval, button, reply=..., draft=...)` presses one. `Approval.buttons`, `written_answer`, `draft` and `timeout_answer` say how a request is answered, and `Decision.answer` and `Decision.draft` how it was. An approval's buttons are `"Approve"` and `"Reject"`, so `answer` works on it too; `approve`, `reject` and `reply` work as before, and point to `answer` when given a request with buttons of its own. Needs Lodol with LodolAI/lodol#5701; against an older Lodol, a request reads with the buttons its kind has.
+
 ### Fixed
 
 - **`trigger_paused` says whether the save turned the workflow off.** A workflow that's on stays on through a save by the member who turned it on, or one that only renames it, but Lodol answered `trigger_paused=True` for any workflow that was on. It now answers `True` only when the save turned it off, once Lodol has LodolAI/lodol#4995. The SDK passes the value through unchanged.
