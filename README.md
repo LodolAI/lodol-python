@@ -174,12 +174,14 @@ for approval in lodol.approvals.list():  # pending ones, newest first
 A request with buttons of its own (`approval.buttons`, such as `("Post it", "Skip")` or just `("Submit",)`) is answered by pressing one with `answer`. `approval.written_answer` says whether it takes writing alongside (`"none"`, `"optional"` or `"required"`), sent as `reply=`, and a request that carries text to check (`approval.draft`) takes it back changed as `draft=`:
 
 ```python
-lodol.approvals.answer(
-    approval,
-    "Post it",
-    reply="Ship it Friday",
-    draft=approval.draft.replace("[3]", "41"),
-)
+for approval in lodol.approvals.list():
+    if "Post it" in approval.buttons:
+        lodol.approvals.answer(
+            approval,
+            "Post it",
+            reply="Ship it Friday",
+            draft=approval.draft.replace("[3]", "41"),
+        )
 ```
 
 The run reads the button pressed as `answer`. An approval's buttons are `"Approve"` and `"Reject"`, so `answer` works on one too.
