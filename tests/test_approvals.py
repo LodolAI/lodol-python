@@ -232,6 +232,125 @@ def test_a_reply_must_be_text(client: Lodol) -> None:
         client.approvals.reply("a1", 4471)  # type: ignore[arg-type]
 
 
+def test_a_request_with_buttons_of_its_own_is_read_with_them(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(
+        respond(
+            200,
+            approval_json(
+                kind="reply",
+                buttons=["Post it", "Skip"],
+                written_answer="none",
+                draft="We fixed [3] bugs.",
+                timeout_answer="Skip",
+            ),
+        )
+    )
+
+    approval = client.approvals.get("a1")
+
+    assert approval.buttons == ("Post it", "Skip")
+    assert approval.written_answer == "none"
+    assert approval.draft == "We fixed [3] bugs."
+    assert approval.timeout_answer == "Skip"
+
+
+def test_an_older_lodols_requests_read_with_the_buttons_their_kind_has(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(respond(200, approval_json()), respond(200, approval_json(kind="reply")))
+
+    approval = client.approvals.get("a1")
+    question = client.approvals.get("a1")
+
+    assert (approval.buttons, approval.written_answer) == (
+        ("Approve", "Reject"),
+        "optional",
+    )
+    assert (question.buttons, question.written_answer) == ((), "required")
+
+
+def test_answer_presses_a_button_with_the_writing_and_the_text_as_changed(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(
+        respond(
+            200,
+            approval_json(
+                kind="reply",
+                status="replied",
+                buttons=["Post it", "Skip"],
+                decision={
+                    "decision": "replied",
+                    "comment": "",
+                    "reply": "Friday",
+                    "answer": "Post it",
+                    "draft": "We fixed 41 bugs.",
+                    "decided_by": {"type": "api", "name": "API key 'Poster'"},
+                    "decided_at": "2026-10-13T09:05:00+00:00",
+                    "via": "api",
+                },
+            ),
+        )
+    )
+    request = Approval(
+        id="a1", kind="reply", status="pending", buttons=("Post it", "Skip")
+    )
+
+    answered = client.approvals.answer(
+        request, "post it", reply="Friday", draft="We fixed 41 bugs."
+    )
+
+    assert api.sent() == ("POST", "/approvals/a1/decision", {})
+    assert api.body() == {
+        "answer": "post it",
+        "reply": "Friday",
+        "draft": "We fixed 41 bugs.",
+    }
+    assert api.last.headers["Idempotency-Key"].startswith("lodol-approval-answer-")
+    assert answered.decision is not None
+    assert answered.decision.answer == "Post it"
+    assert answered.decision.draft == "We fixed 41 bugs."
+
+
+def test_an_approval_can_be_answered_with_its_buttons(
+    client: Lodol, api: FakeAPI
+) -> None:
+    api.queue(respond(200, approval_json(status="rejected")))
+
+    client.approvals.answer(
+        Approval(id="a1", kind="approval", status="pending"), "Reject"
+    )
+
+    assert api.body() == {"answer": "Reject"}
+
+
+def test_answer_refuses_a_button_the_request_doesnt_have(
+    client: Lodol, api: FakeAPI
+) -> None:
+    request = Approval(id="a1", kind="reply", status="pending", buttons=("Submit",))
+    question = Approval(id="a1", kind="reply", status="pending")
+
+    with pytest.raises(ValueError, match="isn't one of this request's buttons"):
+        client.approvals.answer(request, "Approve")
+    with pytest.raises(ValueError, match=r"written reply.*approvals.reply"):
+        client.approvals.answer(question, "Submit")
+    with pytest.raises(TypeError, match="must be text"):
+        client.approvals.answer("a1", 1)  # type: ignore[arg-type]
+
+    assert api.requests == []
+
+
+def test_a_request_with_buttons_is_pointed_to_answer(client: Lodol) -> None:
+    request = Approval(id="a1", kind="reply", status="pending", buttons=("Go",))
+
+    with pytest.raises(ValueError, match=r"approvals.answer"):
+        client.approvals.approve(request)
+    with pytest.raises(ValueError, match=r"approvals.answer"):
+        client.approvals.reply(request, "Sure")
+
+
 @pytest.mark.parametrize(
     ("code", "message"),
     [

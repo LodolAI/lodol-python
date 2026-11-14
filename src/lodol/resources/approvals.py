@@ -1,8 +1,8 @@
 """Approvals: see what runs are waiting on, and answer them.
 
-A workflow's Request approval step pauses its run until someone answers:
-approves or rejects it, or, for a request that asks for one, replies in
-writing. These let another system (a practice-management tool, an ERP, a
+A workflow's Ask a person step (Request approval, before) pauses its run
+until someone answers: presses one of its buttons (Approve or Reject, on an
+approval), or, for a request that asks for one, replies in writing. These let another system (a practice-management tool, an ERP, a
 script) do the answering. An answer sent with an API key is recorded as that
 key's. Answering a request that is no longer pending raises
 ``ConflictError``, whose ``code`` says what happened to it.
@@ -118,6 +118,21 @@ class Approvals:
         with ``text`` as the answer."""
         return _parse_one(self._client._send(_reply_request(approval, text)))
 
+    def answer(
+        self,
+        approval: ApprovalRef,
+        button: str,
+        *,
+        reply: str | None = None,
+        draft: str | None = None,
+    ) -> Approval:
+        """Press one of a request's buttons, as its label reads
+        (``approval.buttons``). ``reply`` is what to write alongside, when the
+        request takes writing; ``draft`` the request's text as changed, when it
+        carries text (``approval.draft``) and it should go on changed."""
+        request = _button_request(approval, button, reply, draft)
+        return _parse_one(self._client._send(request))
+
 
 class AsyncApprovals:
     """Requests from runs for an approval or a reply."""
@@ -199,6 +214,21 @@ class AsyncApprovals:
         """Answer a request that asks for a written reply. The run carries on
         with ``text`` as the answer."""
         return _parse_one(await self._client._send(_reply_request(approval, text)))
+
+    async def answer(
+        self,
+        approval: ApprovalRef,
+        button: str,
+        *,
+        reply: str | None = None,
+        draft: str | None = None,
+    ) -> Approval:
+        """Press one of a request's buttons, as its label reads
+        (``approval.buttons``). ``reply`` is what to write alongside, when the
+        request takes writing; ``draft`` the request's text as changed, when it
+        carries text (``approval.draft``) and it should go on changed."""
+        request = _button_request(approval, button, reply, draft)
+        return _parse_one(await self._client._send(request))
 
 
 class WaitingForApproval(Waiting[Approval | None]):
@@ -347,6 +377,12 @@ def _decision_request(
     approval: ApprovalRef, decision: str, comment: str | None
 ) -> APIRequest:
     if isinstance(approval, Approval) and approval.kind == "reply":
+        if approval.buttons:
+            raise ValueError(
+                "This request has buttons of its own, not Approve and Reject: "
+                "press one with approvals.answer(approval, button), one of "
+                + ", ".join(map(repr, approval.buttons))
+            )
         raise ValueError(
             "This request asks for a written reply, not a decision: answer it "
             "with approvals.reply(approval, text)"
@@ -363,9 +399,45 @@ def _reply_request(approval: ApprovalRef, text: str) -> APIRequest:
             "This request asks for a decision, not a reply: answer it with "
             "approvals.approve() or approvals.reject()"
         )
+    if isinstance(approval, Approval) and approval.buttons:
+        raise ValueError(
+            "This request is answered with a button: press one with "
+            "approvals.answer(approval, button, reply=text), one of "
+            + ", ".join(map(repr, approval.buttons))
+        )
     if not isinstance(text, str):
         raise TypeError(f"The reply must be text, not {type(text).__name__}")
     return _answer(approval, {"reply": text})
+
+
+def _button_request(
+    approval: ApprovalRef, button: str, reply: str | None, draft: str | None
+) -> APIRequest:
+    if not isinstance(button, str):
+        raise TypeError(f"The button must be text, not {type(button).__name__}")
+    for name, value in (("reply", reply), ("draft", draft)):
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"The {name} must be text, not {type(value).__name__}")
+    if isinstance(approval, Approval):
+        offered = approval.buttons or (
+            () if approval.kind == "reply" else ("Approve", "Reject")
+        )
+        if not offered:
+            raise ValueError(
+                "This request asks for a written reply, not a button: answer it "
+                "with approvals.reply(approval, text)"
+            )
+        if button.strip().casefold() not in {label.casefold() for label in offered}:
+            raise ValueError(
+                f"{button!r} isn't one of this request's buttons: "
+                + ", ".join(map(repr, offered))
+            )
+    body: dict[str, Any] = {"answer": button}
+    if reply is not None:
+        body["reply"] = reply
+    if draft is not None:
+        body["draft"] = draft
+    return _answer(approval, body)
 
 
 def _answer(approval: ApprovalRef, body: dict[str, Any]) -> APIRequest:
