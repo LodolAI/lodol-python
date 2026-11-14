@@ -16,7 +16,7 @@ authors = [
 license = "Apache-2.0"
 dependencies = [
     "httpx2>=2.14.0,<3",
-    "anyio>=4.15.1,<5",
+    "anyio>=4.16.0,<5",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
