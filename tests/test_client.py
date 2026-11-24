@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+
 import httpx2
 import pytest
 
@@ -189,6 +191,9 @@ def test_lodol_local_is_reached_directly_never_through_a_proxy(
         assert local._http_client.trust_env is False
     with Lodol(api_key="k") as cloud:
         assert cloud._http_client.trust_env is True
+    # However the scheme is written.
+    with Lodol(api_key="k", base_url="HTTP://localhost:3901") as shouted:
+        assert shouted._http_client.trust_env is False
 
 
 def test_request_repeats_a_parameter_given_a_list(client: Lodol, api: FakeAPI) -> None:
@@ -197,3 +202,18 @@ def test_request_repeats_a_parameter_given_a_list(client: Lodol, api: FakeAPI) -
     client.request("GET", "/things", params={"id": ["a", "b"], "flag": True})
 
     assert str(api.last.url).endswith("/things?id=a&id=b&flag=true")
+
+
+def test_request_sends_dates_and_times_as_iso_8601(client: Lodol, api: FakeAPI) -> None:
+    api.queue(respond(200, {"executions": []}))
+
+    client.request(
+        "GET",
+        "/executions",
+        params={
+            "from": dt.datetime(2026, 5, 1, 9, 30, tzinfo=dt.timezone.utc),
+            "to": dt.date(2026, 6, 1),
+        },
+    )
+
+    assert api.sent()[2] == {"from": "2026-05-01T09:30:00+00:00", "to": "2026-06-01"}

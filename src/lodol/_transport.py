@@ -520,12 +520,18 @@ def still_in_flight(response: httpx2.Response, request: APIRequest) -> ConflictE
 
 
 def connection_error(
-    error: httpx2.RequestError, request: APIRequest, client: BaseClient
+    error: httpx2.RequestError,
+    request: APIRequest,
+    client: BaseClient,
+    timeout: float | None = None,
 ) -> APIConnectionError:
+    """The exception for a request that got no answer. ``timeout`` is the
+    one it was sent with, when not the client's."""
     if isinstance(error, httpx2.TimeoutException):
+        seconds = client.timeout if timeout is None else timeout
         return APITimeoutError(
             f"{request.describe()} got no answer from Lodol within "
-            f"{client.timeout:g} seconds"
+            f"{seconds:g} seconds"
         )
     if is_certificate_error(error):
         return APIConnectionError(
@@ -611,7 +617,7 @@ class BaseClient:
     def _trusts_environment(self) -> bool:
         # Proxy settings from the environment would carry plain-HTTP traffic,
         # key and all, through the proxy: Lodol Local is reached directly.
-        return not self.base_url.startswith("http://")
+        return urlsplit(self.base_url).scheme != "http"
 
     def _prepare(self, request: APIRequest) -> tuple[str, dict[str, str], bytes | None]:
         headers = {
@@ -693,10 +699,10 @@ class SyncAPIClient(BaseClient):
             except httpx2.TransportError as exc:
                 delay = retry_delay_after_error(exc, request, retries_taken, retries)
                 if delay is None:
-                    raise connection_error(exc, request, self) from exc
+                    raise connection_error(exc, request, self, timeout) from exc
                 reason = type(exc).__name__
             except httpx2.RequestError as exc:
-                raise connection_error(exc, request, self) from exc
+                raise connection_error(exc, request, self, timeout) from exc
             else:
                 _log_response(request, response, monotonic() - started)
                 self._note(response)
@@ -780,10 +786,10 @@ class AsyncAPIClient(BaseClient):
             except httpx2.TransportError as exc:
                 delay = retry_delay_after_error(exc, request, retries_taken, retries)
                 if delay is None:
-                    raise connection_error(exc, request, self) from exc
+                    raise connection_error(exc, request, self, timeout) from exc
                 reason = type(exc).__name__
             except httpx2.RequestError as exc:
-                raise connection_error(exc, request, self) from exc
+                raise connection_error(exc, request, self, timeout) from exc
             else:
                 _log_response(request, response, monotonic() - started)
                 self._note(response)

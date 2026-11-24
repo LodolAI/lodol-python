@@ -391,9 +391,15 @@ class Waiting(ABC, Generic[T]):
         """Seconds before the first check. A run known to be unfinished (one
         just started, say) isn't worth checking at once."""
         known = self.latest
-        if known is not None and not known.finished and not known.is_trigger_listener:
-            return self._before_deadline(self._paced(self._next_interval()))
-        return 0.0
+        if known is None or known.finished or known.is_trigger_listener:
+            return 0.0
+        delay = self._paced(self._next_interval())
+        if self._deadline is None:
+            return delay
+        # Never past the deadline, but a deadline already come (a timeout of
+        # 0) still gets the one look it promises, as a run known only by its
+        # id does.
+        return min(delay, max(0.0, self._deadline - _transport.monotonic()))
 
     def check_timeout(self) -> float:
         """How long the next check may take: the client's timeout, but not

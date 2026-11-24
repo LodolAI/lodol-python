@@ -91,6 +91,18 @@ def test_a_write_without_a_key_is_never_sent_twice(client: Lodol, api: FakeAPI) 
     assert len(api.requests) == 1
 
 
+def test_a_timeout_names_the_time_the_request_was_given(
+    client: Lodol, api: FakeAPI
+) -> None:
+    # A wait's checks are given less than the client's 30 seconds near the
+    # deadline; the error says what they had.
+    api.queue(httpx2.ReadTimeout("slow"))
+
+    request = _transport.APIRequest("GET", "/executions/683b")
+    with pytest.raises(APITimeoutError, match="within 2.5 seconds"):
+        client._send(request, max_retries=0, timeout=2.5)
+
+
 def test_any_request_is_retried_when_it_never_left(client: Lodol, api: FakeAPI) -> None:
     api.queue(httpx2.ConnectError("refused"), respond(200, {"ok": True}))
 
