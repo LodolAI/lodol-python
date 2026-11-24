@@ -427,7 +427,7 @@ def _button_request(
                 "This request asks for a written reply, not a button: answer it "
                 "with approvals.reply(approval, text)"
             )
-        if button.strip().casefold() not in {label.casefold() for label in offered}:
+        if _label(button) not in {_label(label) for label in offered}:
             raise ValueError(
                 f"{button!r} isn't one of this request's buttons: "
                 + ", ".join(map(repr, offered))
@@ -438,6 +438,11 @@ def _button_request(
     if draft is not None:
         body["draft"] = draft
     return _answer(approval, body)
+
+
+def _label(button: str) -> str:
+    """A button's label as Lodol matches it: spacing and case aside."""
+    return " ".join(button.split()).casefold()
 
 
 def _answer(approval: ApprovalRef, body: dict[str, Any]) -> APIRequest:

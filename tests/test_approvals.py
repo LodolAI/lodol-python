@@ -326,6 +326,17 @@ def test_an_approval_can_be_answered_with_its_buttons(
     assert api.body() == {"answer": "Reject"}
 
 
+def test_a_button_is_matched_as_lodol_matches_it(client: Lodol, api: FakeAPI) -> None:
+    # Lodol pays no mind to case or spacing, so neither does the check before
+    # sending; the label goes as given.
+    api.queue(respond(200, approval_json(status="replied")))
+    request = Approval(id="a1", kind="reply", status="pending", buttons=("Post it",))
+
+    client.approvals.answer(request, "  post   IT ")
+
+    assert api.body() == {"answer": "  post   IT "}
+
+
 def test_answer_refuses_a_button_the_request_doesnt_have(
     client: Lodol, api: FakeAPI
 ) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any, Mapping
 
 import httpx2
@@ -160,4 +161,8 @@ def _query_value(value: Any) -> str | list[str]:
         return [str(_query_value(item)) for item in value]
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, (dt.datetime, dt.date, dt.time)):
+        # As ISO 8601, the way the SDK sends them everywhere else: str() puts
+        # a space between a datetime's date and time.
+        return value.isoformat()
     return str(value)

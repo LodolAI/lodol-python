@@ -8,6 +8,12 @@
 
 ### Fixed
 
+- **A wait with `timeout=0` looks at the run.** `workflows.run(..., wait=True, timeout=0)`, `runs.retry(..., wait=True, timeout=0)` and `runs.wait(run, timeout=0)` given a `Run` raised `WaitTimeoutError` ("it couldn't be checked") without asking Lodol, where `runs.wait(run_id, timeout=0)` checked once. They now all check once.
+- **A timed-out check says how long it had.** `APITimeoutError` named the client's `timeout`, not the shorter one a wait gives its checks near the deadline.
+- **`approvals.answer` matches a button as Lodol does**, ignoring case and spacing, so `"Post  it"` is no longer refused before it's sent for a request whose button is `"Post it"`.
+- **`request()` sends dates and times as ISO 8601** in `params`, as the SDK does everywhere else, not with the space `str()` puts in a `datetime`.
+- **A `base_url` written `HTTP://…`** is reached directly, never through a proxy from the environment, as `http://` is.
+
 - **`trigger_paused` says whether the save turned the workflow off.** A workflow that's on stays on through a save by the member who turned it on, or one that only renames it, but Lodol answered `trigger_paused=True` for any workflow that was on. It now answers `True` only when the save turned it off, once Lodol has LodolAI/lodol#4995. The SDK passes the value through unchanged.
 
 ## 0.2.0 (2026-10-29)

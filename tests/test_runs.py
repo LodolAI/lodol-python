@@ -499,6 +499,35 @@ def test_a_zero_timeout_looks_once(
     assert clock.sleeps == []
 
 
+def test_a_zero_timeout_looks_once_at_a_run_just_started(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    # A run in hand that hasn't finished is checked after a pause, but a
+    # deadline already come still gets its one look, and may find it done.
+    api.queue(
+        respond(202, run_json(status="queued")),
+        respond(200, run_json(status="success")),
+        respond(200, run_json(status="success", steps=[])),
+    )
+
+    run = client.workflows.run("665f", wait=True, timeout=0)
+
+    assert run.succeeded
+    assert len(api.requests) == 3
+    assert sum(clock.sleeps) == 0
+
+
+def test_a_zero_timeout_on_a_run_in_hand_says_what_it_saw(
+    client: Lodol, api: FakeAPI, clock: FakeClock
+) -> None:
+    api.queue(respond(200, run_json(status="running")))
+
+    with pytest.raises(WaitTimeoutError, match="it is still running"):
+        client.runs.wait(Run.from_api(run_json(status="queued")), timeout=0)
+
+    assert len(api.requests) == 1
+
+
 @pytest.mark.parametrize("timeout", [-1, "60"])
 def test_wait_refuses_a_bad_timeout(client: Lodol, timeout: object) -> None:
     with pytest.raises((ValueError, TypeError), match="timeout"):
